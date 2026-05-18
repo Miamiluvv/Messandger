@@ -1,0 +1,189 @@
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+import os
+import uuid
+
+from app.config import settings
+from app.database import init_db, async_session
+from app.routers import auth, chats, websocket, admin, calls, polls, notifications
+
+
+async def scheduled_message_worker():
+    """Background task: every 15s look for scheduled messages whose time has come and dispatch them."""
+    from sqlalchemy import select
+    from app.models.message import Message
+    from app.models.chat import ChatMember
+    from app.models.user import User
+    from app.routers.websocket import manager
+
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            async with async_session() as session:
+                result = await session.execute(
+                    select(Message).where(
+                        Message.is_scheduled == True,
+                        Message.scheduled_at != None,
+                        Message.scheduled_at <= now,
+                    )
+                )
+                due = result.scalars().all()
+                for msg in due:
+                    msg.is_scheduled = False
+                    sender = (await session.execute(select(User).where(User.id == msg.sender_id))).scalar_one_or_none()
+                    members = (await session.execute(
+                        select(ChatMember).where(ChatMember.chat_id == msg.chat_id)
+                    )).scalars().all()
+                    payload = {
+                        "id": str(msg.id),
+                        "chat_id": str(msg.chat_id),
+                        "sender_id": str(msg.sender_id),
+                        "sender_name": f"{sender.first_name} {sender.last_name}" if sender else "",
+                        "sender_avatar": sender.avatar_url if sender else None,
+                        "content": msg.content,
+                        "message_type": msg.message_type,
+                        "created_at": msg.created_at.isoformat() if msg.created_at else None,
+                        "is_edited": False,
+                        "is_deleted": False,
+                        "attachments": [],
+                        "reactions": [],
+                        "reply_to": None,
+                        "poll": None,
+                        "is_read": False,
+                    }
+                    recipient_ids = [str(m.user_id) for m in members]
+                    await manager.send_to_users(recipient_ids, {
+                        "type": "new_message",
+                        "chat_id": str(msg.chat_id),
+                        "message": payload,
+                    })
+                if due:
+                    await session.commit()
+        except Exception as e:
+            print(f"[scheduled_message_worker] error: {e}")
+        await asyncio.sleep(15)
+
+
+async def seed_data():
+    """Seed initial data if DB is empty."""
+    from sqlalchemy import select
+    from app.models.user import User, Department
+    from app.models.chat import Chat, ChatMember
+    from app.services.auth import get_password_hash
+
+    async with async_session() as session:
+        # Check if departments exist
+        result = await session.execute(select(Department).limit(1))
+        if result.scalar_one_or_none() is not None:
+            return  # Already seeded
+
+        # Departments
+        departments = [
+            Department(id=uuid.UUID('00000000-0000-0000-0000-000000000001'), name='Управление информатизации', short_name='УИ'),
+            Department(id=uuid.UUID('00000000-0000-0000-0000-000000000002'), name='Управление государственной службы и кадров', short_name='УГСК'),
+            Department(id=uuid.UUID('00000000-0000-0000-0000-000000000003'), name='Управление имущества', short_name='УИм'),
+            Department(id=uuid.UUID('00000000-0000-0000-0000-000000000004'), name='Управление земельных ресурсов', short_name='УЗР'),
+            Department(id=uuid.UUID('00000000-0000-0000-0000-000000000005'), name='Правовое управление', short_name='ПУ'),
+            Department(id=uuid.UUID('00000000-0000-0000-0000-000000000006'), name='Управление бухгалтерского учета и отчетности', short_name='УБУО'),
+        ]
+        for d in departments:
+            session.add(d)
+
+        # Admin user
+        admin_user = User(
+            id=uuid.UUID('00000000-0000-0000-0000-000000000099'),
+            email='admin@dgi.gov',
+            password_hash=get_password_hash('Admin123!'),
+            first_name='Администратор',
+            last_name='Системный',
+            patronymic='Системович',
+            department_id=uuid.UUID('00000000-0000-0000-0000-000000000001'),
+            position='Системный администратор',
+            role='super_admin',
+        )
+        session.add(admin_user)
+
+        # News channel
+        news_channel = Chat(
+            id=uuid.UUID('00000000-0000-0000-0000-000000000100'),
+            chat_type='channel',
+            name='Новости ДГИ',
+            description='Официальный новостной канал Департамента городского имущества',
+            owner_id=uuid.UUID('00000000-0000-0000-0000-000000000099'),
+            is_news_channel=True,
+        )
+        session.add(news_channel)
+        await session.flush()
+
+        session.add(ChatMember(chat_id=news_channel.id, user_id=admin_user.id, role='owner'))
+
+        # Saved chat for admin
+        saved = Chat(chat_type='saved', name='Избранное', owner_id=admin_user.id)
+        session.add(saved)
+        await session.flush()
+        session.add(ChatMember(chat_id=saved.id, user_id=admin_user.id, role='owner'))
+
+        await session.commit()
+        print("✓ Начальные данные загружены")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    await seed_data()
+    worker_task = asyncio.create_task(scheduled_message_worker())
+    try:
+        yield
+    finally:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(
+    title="Корпоративный Мессенджер ДГИ",
+    version="2.0.0",
+    lifespan=lifespan
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.middleware("http")
+async def security_headers_middleware(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(self), camera=(self), display-capture=(self)"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["X-XSS-Protection"] = "0"
+    return response
+
+os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
+
+app.include_router(auth.router)
+app.include_router(chats.router)
+app.include_router(admin.router)
+app.include_router(calls.router)
+app.include_router(polls.router)
+app.include_router(notifications.router)
+app.include_router(websocket.router)
+
+
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok", "service": "Корпоративный Мессенджер ДГИ"}
