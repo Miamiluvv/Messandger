@@ -241,6 +241,8 @@ async def get_messages(chat_id: str, limit: int = 50, offset: int = 0, db: Async
             "is_edited": msg.is_edited,
             "is_deleted": msg.is_deleted,
             "is_pinned": msg.is_pinned,
+            "allow_download": bool(getattr(msg, "allow_download", True)),
+            "forwarded_from_id": str(msg.forwarded_from_id) if msg.forwarded_from_id else None,
             "attachments": attachments_data,
             "reactions": reactions_data,
             "poll": poll_data,
@@ -269,6 +271,7 @@ async def send_message(chat_id: str, data: dict, db: AsyncSession = Depends(get_
         content=data.get("content"),
         message_type=data.get("message_type", "text"),
         reply_to_id=uuid_mod.UUID(data["reply_to_id"]) if data.get("reply_to_id") else None,
+        allow_download=bool(data.get("allow_download", True)),
         scheduled_at=data.get("scheduled_at"),
         is_scheduled=bool(data.get("scheduled_at")),
     )
@@ -292,6 +295,8 @@ async def send_message(chat_id: str, data: dict, db: AsyncSession = Depends(get_
         "sender_avatar": current_user.avatar_url,
         "content": message.content,
         "message_type": message.message_type,
+        "allow_download": bool(message.allow_download),
+        "forwarded_from_id": None,
         "created_at": message.created_at.isoformat() if message.created_at else None,
         "is_edited": False,
         "is_deleted": False,
@@ -370,6 +375,7 @@ async def mark_read(chat_id: str, data: dict, db: AsyncSession = Depends(get_db)
 async def upload_file(
     chat_id: str,
     file: UploadFile = File(...),
+    allow_download: bool = Form(True),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -415,6 +421,7 @@ async def upload_file(
         sender_id=current_user.id,
         content=display_content,
         message_type=msg_type,
+        allow_download=bool(allow_download),
     )
     db.add(message)
     await db.flush()
@@ -443,6 +450,8 @@ async def upload_file(
         "sender_avatar": current_user.avatar_url,
         "content": display_content,
         "message_type": msg_type,
+        "allow_download": bool(message.allow_download),
+        "forwarded_from_id": None,
         "created_at": message.created_at.isoformat() if message.created_at else None,
         "is_edited": False,
         "is_deleted": False,
@@ -650,3 +659,183 @@ async def schedule_message(
         "scheduled_at": scheduled_at.isoformat() if scheduled_at else None,
         "is_scheduled": True,
     }
+
+
+# ============================================================================
+# Search messages
+# ============================================================================
+@router.get("/{chat_id}/messages/search")
+async def search_messages(
+    chat_id: str, q: str, limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    cid = uuid_mod.UUID(chat_id)
+    member_check = await db.execute(
+        select(ChatMember).where(ChatMember.chat_id == cid, ChatMember.user_id == current_user.id)
+    )
+    if not member_check.scalar_one_or_none():
+        raise HTTPException(status_code=403, detail="Вы не участник этого чата")
+
+    if not q or not q.strip():
+        return []
+    pattern = f"%{q.strip()}%"
+    result = await db.execute(
+        select(Message).where(
+            Message.chat_id == cid,
+            Message.is_scheduled == False,
+            Message.is_deleted == False,
+            Message.content.ilike(pattern),
+        ).order_by(Message.created_at.desc()).limit(limit)
+    )
+    msgs = result.scalars().all()
+    items = []
+    for m in msgs:
+        sender_r = await db.execute(select(User).where(User.id == m.sender_id))
+        sender = sender_r.scalar_one_or_none()
+        items.append({
+            "id": str(m.id),
+            "chat_id": str(m.chat_id),
+            "content": m.content,
+            "sender_id": str(m.sender_id),
+            "sender_name": f"{sender.first_name} {sender.last_name}" if sender else "",
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+        })
+    return items
+
+
+# ============================================================================
+# Media gallery for a chat (images / videos / files / audio / links)
+# ============================================================================
+@router.get("/{chat_id}/media")
+async def chat_media(
+    chat_id: str, kind: str = "image", limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """kind: image | video | file | audio | link"""
+    cid = uuid_mod.UUID(chat_id)
+    member_check = await db.execute(
+        select(ChatMember).where(ChatMember.chat_id == cid, ChatMember.user_id == current_user.id)
+    )
+    if not member_check.scalar_one_or_none():
+        raise HTTPException(status_code=403, detail="Вы не участник этого чата")
+
+    if kind == "link":
+        # Find messages containing URLs
+        import re
+        url_re = re.compile(r"https?://\S+")
+        result = await db.execute(
+            select(Message).where(
+                Message.chat_id == cid,
+                Message.is_scheduled == False,
+                Message.is_deleted == False,
+                Message.content.ilike("%http%"),
+            ).order_by(Message.created_at.desc()).limit(limit)
+        )
+        out = []
+        for m in result.scalars().all():
+            for url in url_re.findall(m.content or ""):
+                out.append({
+                    "message_id": str(m.id),
+                    "url": url,
+                    "created_at": m.created_at.isoformat() if m.created_at else None,
+                })
+        return out
+
+    # Map kind → message_type
+    type_map = {
+        "image": ["image"],
+        "video": ["video"],
+        "audio": ["audio", "voice"],
+        "file": ["file"],
+    }
+    types = type_map.get(kind, ["file"])
+    result = await db.execute(
+        select(Message).where(
+            Message.chat_id == cid,
+            Message.is_scheduled == False,
+            Message.is_deleted == False,
+            Message.message_type.in_(types),
+        ).order_by(Message.created_at.desc()).limit(limit)
+    )
+    items = []
+    for m in result.scalars().all():
+        for a in m.attachments:
+            items.append({
+                "message_id": str(m.id),
+                "attachment_id": str(a.id),
+                "file_name": a.file_name,
+                "file_url": a.file_url,
+                "file_size": a.file_size,
+                "file_type": a.file_type,
+                "allow_download": bool(getattr(m, "allow_download", True)),
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            })
+    return items
+
+
+# ============================================================================
+# Forward a message to another chat
+# ============================================================================
+@router.post("/{chat_id}/messages/{message_id}/forward")
+async def forward_message(
+    chat_id: str, message_id: str, data: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """data = { target_chat_ids: [str, ...] }"""
+    src_mid = uuid_mod.UUID(message_id)
+    src_r = await db.execute(select(Message).where(Message.id == src_mid))
+    src = src_r.scalar_one_or_none()
+    if not src:
+        raise HTTPException(status_code=404, detail="Сообщение не найдено")
+    # Permission: must be a member of the source chat
+    src_mem = await db.execute(
+        select(ChatMember).where(ChatMember.chat_id == src.chat_id, ChatMember.user_id == current_user.id)
+    )
+    if not src_mem.scalar_one_or_none():
+        raise HTTPException(status_code=403, detail="Нет доступа к исходному чату")
+
+    targets = data.get("target_chat_ids") or []
+    created = []
+    for tgt in targets:
+        try:
+            tcid = uuid_mod.UUID(tgt)
+        except Exception:
+            continue
+        # Must be member of target with write rights
+        tgt_mem_r = await db.execute(
+            select(ChatMember).where(ChatMember.chat_id == tcid, ChatMember.user_id == current_user.id)
+        )
+        tgt_mem = tgt_mem_r.scalar_one_or_none()
+        if not tgt_mem or tgt_mem.role == "readonly":
+            continue
+        new_msg = Message(
+            chat_id=tcid,
+            sender_id=current_user.id,
+            content=src.content,
+            message_type=src.message_type,
+            forwarded_from_id=src.id,
+            allow_download=bool(getattr(src, "allow_download", True)),
+        )
+        db.add(new_msg)
+        await db.flush()
+        # Copy attachments
+        for a in src.attachments:
+            db.add(MessageAttachment(
+                message_id=new_msg.id,
+                file_name=a.file_name,
+                file_url=a.file_url,
+                file_size=a.file_size,
+                file_type=a.file_type,
+                thumbnail_url=a.thumbnail_url,
+            ))
+        tgt_mem.last_read_message_id = new_msg.id
+        # bump chat
+        chat_r = await db.execute(select(Chat).where(Chat.id == tcid))
+        c = chat_r.scalar_one_or_none()
+        if c:
+            c.updated_at = datetime.utcnow()
+        created.append(str(new_msg.id))
+    return {"created": created, "count": len(created)}

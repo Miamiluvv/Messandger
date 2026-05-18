@@ -1,8 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
-import { Send, Paperclip, Smile, Phone, Video, X, BarChart3, UserPlus, Settings, Image, Mic, MicOff, Clock, Square, CalendarClock } from 'lucide-react'
+import { Send, Paperclip, Smile, Phone, Video, X, BarChart3, UserPlus, Settings, Image, Mic, Clock, Square, CalendarClock, Search, FolderOpen, Lock } from 'lucide-react'
+import EmojiPicker, { EmojiStyle, Theme as EmojiTheme } from 'emoji-picker-react'
 import { useAuthStore } from '../store/authStore'
 import { useChatStore } from '../store/chatStore'
 import { useWebSocketStore } from '../store/websocketStore'
+import { usePresenceStore, formatLastSeen } from '../store/presenceStore'
+import { useThemeStore } from '../store/themeStore'
 import Avatar from './Avatar'
 import MessageBubble from './MessageBubble'
 import PollModal from './PollModal'
@@ -10,6 +13,7 @@ import AddMembersModal from './AddMembersModal'
 import ChatSettingsModal from './ChatSettingsModal'
 import ImageEditorModal from './ImageEditorModal'
 import ScheduledMessagesModal from './ScheduledMessagesModal'
+import MediaGalleryModal from './MediaGalleryModal'
 import api from '../api/axios'
 import toast from 'react-hot-toast'
 import { confirmDelete } from '../store/confirmStore'
@@ -31,7 +35,15 @@ export default function ChatWindow() {
   const [scheduleDate, setScheduleDate] = useState('')
   const [showScheduledList, setShowScheduledList] = useState(false)
   const [imageToEdit, setImageToEdit] = useState(null)
+  const [showEmoji, setShowEmoji] = useState(false)
+  const [allowDownload, setAllowDownload] = useState(true)
+  const [showSearch, setShowSearch] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState([])
+  const [showMedia, setShowMedia] = useState(false)
+  const theme = useThemeStore((s) => s.theme)
   const messagesEndRef = useRef(null)
+  const messagesContainerRef = useRef(null)
   const typingTimeoutRef = useRef(null)
   const fileInputRef = useRef(null)
   const imageInputRef = useRef(null)
@@ -85,6 +97,7 @@ export default function ChatWindow() {
     for (const file of files) {
       const formData = new FormData()
       formData.append('file', file)
+      formData.append('allow_download', allowDownload ? 'true' : 'false')
       try {
         const res = await api.post(`/chats/${activeChat.id}/upload`, formData, {
           headers: { 'Content-Type': 'multipart/form-data' }
@@ -97,6 +110,26 @@ export default function ChatWindow() {
       }
     }
     e.target.value = ''
+  }
+
+  const scrollToMessage = (id) => {
+    const el = document.getElementById(`msg-${id}`)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      el.classList.add('ring-2', 'ring-primary-500', 'rounded-xl', 'transition-all')
+      setTimeout(() => el.classList.remove('ring-2', 'ring-primary-500'), 1500)
+    }
+  }
+
+  const runSearch = async (q) => {
+    setSearchQuery(q)
+    if (!q.trim()) { setSearchResults([]); return }
+    try {
+      const res = await api.get(`/chats/${activeChat.id}/messages/search`, { params: { q } })
+      setSearchResults(res.data)
+    } catch {
+      setSearchResults([])
+    }
   }
 
   const handleStartCall = async (callType) => {
@@ -134,6 +167,7 @@ export default function ChatWindow() {
         const file = new File([blob], `voice_${Date.now()}.webm`, { type: 'audio/webm' })
         const formData = new FormData()
         formData.append('file', file)
+        formData.append('allow_download', allowDownload ? 'true' : 'false')
         try {
           const res = await api.post(`/chats/${activeChat.id}/upload`, formData, {
             headers: { 'Content-Type': 'multipart/form-data' }
@@ -213,6 +247,7 @@ export default function ChatWindow() {
     const file = new File([editedBlob], imageToEdit.file.name || 'image.png', { type: editedBlob.type || 'image/png' })
     const formData = new FormData()
     formData.append('file', file)
+    formData.append('allow_download', allowDownload ? 'true' : 'false')
     try {
       const res = await api.post(`/chats/${activeChat.id}/upload`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
@@ -235,21 +270,18 @@ export default function ChatWindow() {
 
       {/* Header */}
       <div className="h-16 px-4 flex items-center justify-between border-b border-dark-700 bg-dark-900/95 backdrop-blur-sm flex-shrink-0">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 min-w-0">
           <Avatar name={chatName} url={activeChat.chat_type === 'private' ? activeChat.members?.find(m => m.user_id !== user?.id)?.avatar_url || activeChat.avatar_url : activeChat.avatar_url} size="md" />
-          <div>
-            <h3 className="font-semibold text-white text-sm">{chatName}</h3>
-            <p className="text-xs text-dark-400">
-              {activeChat.chat_type === 'private' ? 'Личный чат' :
-               activeChat.chat_type === 'saved' ? 'Ваши заметки и файлы' :
-               activeChat.is_news_channel ? 'Новостной канал' :
-               `${activeChat.members?.length || 0} участников`}
-            </p>
+          <div className="min-w-0">
+            <h3 className="font-heading font-semibold text-white text-sm truncate">{chatName}</h3>
+            <ChatSubtitle chat={activeChat} userId={user?.id} />
           </div>
         </div>
         {activeChat.chat_type !== 'saved' && (
           <div className="flex items-center gap-1">
-            <button onClick={() => setShowScheduledList(true)} className="p-2 rounded-lg hover:bg-dark-700 text-dark-400 hover:text-white transition-colors" title="Запланированные сообщения"><CalendarClock size={18} /></button>
+            <button onClick={() => setShowSearch(v => !v)} className={`p-2 rounded-lg transition-colors ${showSearch ? 'bg-primary-600/30 text-primary-300' : 'hover:bg-dark-700 text-dark-400 hover:text-white'}`} title="Поиск по чату"><Search size={18} /></button>
+            <button onClick={() => setShowMedia(true)} className="p-2 rounded-lg hover:bg-dark-700 text-dark-400 hover:text-white transition-colors" title="Файлы и медиа"><FolderOpen size={18} /></button>
+            <button onClick={() => setShowScheduledList(true)} className="p-2 rounded-lg hover:bg-dark-700 text-dark-400 hover:text-white transition-colors" title="Запланированные"><CalendarClock size={18} /></button>
             <button onClick={() => handleStartCall('audio')} className="p-2 rounded-lg hover:bg-dark-700 text-dark-400 hover:text-white transition-colors" title="Аудиозвонок"><Phone size={18} /></button>
             <button onClick={() => handleStartCall('video')} className="p-2 rounded-lg hover:bg-dark-700 text-dark-400 hover:text-white transition-colors" title="Видеозвонок"><Video size={18} /></button>
             {isAdminOfChat && activeChat.chat_type !== 'private' && (
@@ -261,6 +293,41 @@ export default function ChatWindow() {
           </div>
         )}
       </div>
+
+      {/* Search bar */}
+      {showSearch && (
+        <div className="px-4 py-2 border-b border-dark-700 bg-dark-800/50 flex flex-col gap-2">
+          <div className="relative">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-dark-400" />
+            <input
+              type="text"
+              autoFocus
+              value={searchQuery}
+              onChange={(e) => runSearch(e.target.value)}
+              placeholder="Найти в этом чате..."
+              className="w-full pl-9 pr-9 py-2 bg-dark-700 border border-dark-600 rounded-xl text-sm text-white focus:outline-none focus:ring-1 focus:ring-primary-500"
+            />
+            <button onClick={() => { setShowSearch(false); setSearchQuery(''); setSearchResults([]) }} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-dark-400 hover:text-white"><X size={14} /></button>
+          </div>
+          {searchResults.length > 0 && (
+            <div className="max-h-40 overflow-y-auto space-y-1">
+              {searchResults.map((r) => (
+                <button
+                  key={r.id}
+                  onClick={() => { scrollToMessage(r.id); setShowSearch(false) }}
+                  className="w-full text-left bg-dark-800 hover:bg-dark-700 rounded-lg px-3 py-1.5"
+                >
+                  <p className="text-[10px] text-primary-400">{r.sender_name} · {new Date(r.created_at).toLocaleString('ru')}</p>
+                  <p className="text-xs text-white truncate">{r.content}</p>
+                </button>
+              ))}
+            </div>
+          )}
+          {searchQuery && searchResults.length === 0 && (
+            <p className="text-xs text-dark-400 text-center py-1">Ничего не найдено</p>
+          )}
+        </div>
+      )}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-1">
@@ -278,6 +345,7 @@ export default function ChatWindow() {
                   {showDate && <DateSeparator date={msg.created_at} />}
                   <MessageBubble msg={msg} isMine={isMine} chatId={activeChat.id}
                     onReply={(m) => setReplyTo(m)}
+                    onReplyClick={scrollToMessage}
                     onEdit={(m) => { setEditingMessage(m); setInputText(m.content || '') }}
                     onDelete={async (m) => {
                       if (await confirmDelete('Удалить это сообщение? Действие нельзя отменить.')) {
@@ -293,9 +361,11 @@ export default function ChatWindow() {
         )}
       </div>
 
-      {/* Typing */}
-      {chatTypingUsers.length > 0 && (
-        <div className="px-4 py-1"><p className="text-xs text-primary-400 animate-pulse">Кто-то печатает...</p></div>
+      {/* Typing (фильтруем сами себя) */}
+      {chatTypingUsers.filter((uid) => uid !== user?.id).length > 0 && (
+        <div className="px-4 py-1">
+          <p className="text-xs text-primary-400 animate-pulse">{typingLabel(chatTypingUsers, user, activeChat)}</p>
+        </div>
       )}
 
       {/* Reply / Edit bar */}
@@ -341,7 +411,32 @@ export default function ChatWindow() {
 
       {/* Input */}
       {!isReadonly && !recording && (
-        <div className="px-4 py-3 border-t border-dark-700 bg-dark-900 flex-shrink-0">
+        <div className="px-4 py-3 border-t border-dark-700 bg-dark-900 flex-shrink-0 relative">
+          {/* Allow-download toggle for attachments */}
+          <div className="flex items-center justify-end gap-1 mb-1.5">
+            <label className="flex items-center gap-1.5 text-[11px] text-dark-400 cursor-pointer select-none hover:text-dark-200 transition-colors">
+              <input
+                type="checkbox"
+                checked={allowDownload}
+                onChange={(e) => setAllowDownload(e.target.checked)}
+                className="w-3 h-3 accent-primary-600"
+              />
+              {allowDownload ? 'Разрешить скачивание вложений' : <span className="inline-flex items-center gap-1 text-primary-400"><Lock size={10} /> Скачивание запрещено</span>}
+            </label>
+          </div>
+          {showEmoji && (
+            <div className="absolute bottom-full right-2 mb-2 z-30 shadow-2xl rounded-2xl overflow-hidden">
+              <EmojiPicker
+                onEmojiClick={(d) => { setInputText((t) => t + d.emoji); setShowEmoji(false) }}
+                theme={theme === 'light' ? EmojiTheme.LIGHT : EmojiTheme.DARK}
+                emojiStyle={EmojiStyle.NATIVE}
+                lazyLoadEmojis
+                searchPlaceHolder="Поиск эмодзи..."
+                width={320}
+                height={400}
+              />
+            </div>
+          )}
           <div className="flex items-end gap-1.5">
             <button onClick={() => fileInputRef.current?.click()} className="p-2 rounded-xl hover:bg-dark-700 text-dark-400 hover:text-white transition-colors flex-shrink-0" title="Прикрепить файл">
               <Paperclip size={18} />
@@ -350,6 +445,9 @@ export default function ChatWindow() {
               <Image size={18} />
             </button>
             <input type="file" ref={imageInputRef} className="hidden" accept="image/*" onChange={handleImageSelect} />
+            <button onClick={() => setShowEmoji(v => !v)} className={`p-2 rounded-xl transition-colors flex-shrink-0 ${showEmoji ? 'bg-primary-600/30 text-primary-300' : 'hover:bg-dark-700 text-dark-400 hover:text-white'}`} title="Эмодзи">
+              <Smile size={18} />
+            </button>
             {activeChat.chat_type !== 'saved' && (
               <>
                 <button onClick={() => setShowPollModal(true)} className="p-2 rounded-xl hover:bg-dark-700 text-dark-400 hover:text-white transition-colors flex-shrink-0" title="Опрос">
@@ -387,8 +485,37 @@ export default function ChatWindow() {
       {showSettings && <ChatSettingsModal chat={activeChat} onClose={() => setShowSettings(false)} />}
       {imageToEdit && <ImageEditorModal imageData={imageToEdit.dataUrl} onSave={handleImageEditorSave} onClose={() => setImageToEdit(null)} />}
       {showScheduledList && <ScheduledMessagesModal chatId={activeChat.id} onClose={() => setShowScheduledList(false)} />}
+      {showMedia && <MediaGalleryModal chatId={activeChat.id} title={`Файлы и медиа · ${chatName}`} onClose={() => setShowMedia(false)} />}
     </div>
   )
+}
+
+function ChatSubtitle({ chat, userId }) {
+  const presence = usePresenceStore((s) => s.presence)
+  if (!chat) return null
+  if (chat.chat_type === 'saved') return <p className="text-xs text-dark-400">Ваши заметки и файлы</p>
+  if (chat.is_news_channel) return <p className="text-xs text-dark-400">Новостной канал</p>
+  if (chat.chat_type === 'private') {
+    const other = chat.members?.find((m) => m.user_id !== userId)
+    if (!other) return <p className="text-xs text-dark-400">Личный чат</p>
+    const p = presence[String(other.user_id)]
+    const online = p?.status === 'online' || other.status === 'online'
+    if (online) return <p className="text-xs text-green-400 flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block" /> в сети</p>
+    return <p className="text-xs text-dark-400">{formatLastSeen(p?.last_seen || other.last_seen)}</p>
+  }
+  return <p className="text-xs text-dark-400">{chat.members?.length || 0} участников</p>
+}
+
+function typingLabel(typingIds, currentUser, chat) {
+  const ids = typingIds.filter((uid) => uid !== currentUser?.id)
+  if (ids.length === 0) return ''
+  const m = (uid) => {
+    const mem = chat?.members?.find((x) => String(x.user_id) === String(uid))
+    return mem ? `${mem.first_name} ${mem.last_name}` : 'кто-то'
+  }
+  if (ids.length === 1) return `${m(ids[0])} печатает...`
+  if (ids.length === 2) return `${m(ids[0])} и ${m(ids[1])} печатают...`
+  return 'Несколько участников печатают...'
 }
 
 function getChatDisplayName(chat, currentUser) {

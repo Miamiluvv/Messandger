@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import toast from 'react-hot-toast'
 import { useChatStore } from './chatStore'
 import { useCallStore } from './callStore'
+import { usePresenceStore } from './presenceStore'
 
 export const useWebSocketStore = create((set, get) => ({
   ws: null,
@@ -10,6 +11,7 @@ export const useWebSocketStore = create((set, get) => ({
   connect: (token) => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${protocol}//${window.location.host}/ws?token=${token}`)
+    const currentUserId = (() => { try { return JSON.parse(atob(token.split('.')[1])).sub } catch { return null } })()
 
     ws.onopen = () => set({ ws, connected: true })
     ws.onclose = () => {
@@ -21,17 +23,26 @@ export const useWebSocketStore = create((set, get) => ({
       const chatStore = useChatStore.getState()
 
       if (data.type === 'new_message') {
-        // Не добавляем если это наше собственное сообщение (оно уже добавлено через API)
-        const currentUserId = JSON.parse(atob(token.split('.')[1])).sub
+        // Не добавляем если это наше собственное сообщение (оно уже добавлено через API),
+        // но для отложенных (worker disptached) — добавляем всегда.
         if (data.message?.sender_id !== currentUserId) {
+          chatStore.addMessage(data.chat_id, data.message)
+        } else if (data.is_scheduled_dispatch) {
           chatStore.addMessage(data.chat_id, data.message)
         }
       } else if (data.type === 'typing') {
-        chatStore.addTypingUser(data.chat_id, data.user_id)
+        // Не показываем "печатает" самому себе
+        if (data.user_id !== currentUserId) {
+          chatStore.addTypingUser(data.chat_id, data.user_id)
+        }
       } else if (data.type === 'stop_typing') {
-        chatStore.removeTypingUser(data.chat_id, data.user_id)
+        if (data.user_id !== currentUserId) {
+          chatStore.removeTypingUser(data.chat_id, data.user_id)
+        }
       } else if (data.type === 'read') {
         chatStore.markChatRead?.(data.chat_id, data.user_id)
+      } else if (data.type === 'presence') {
+        usePresenceStore.getState().setPresence(data.user_id, data.status, data.last_seen)
       } else if (data.type === 'message_deleted') {
         chatStore.handleMessageDeleted(data.chat_id, data.message_id, data.hard_delete)
       } else if (data.type === 'notification') {

@@ -1,10 +1,14 @@
 import json
+from datetime import datetime
 from typing import Dict, Set
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from jose import JWTError, jwt
+from sqlalchemy import select
 
 from app.config import settings
+from app.database import async_session
+from app.models.user import User
 
 router = APIRouter()
 
@@ -20,6 +24,9 @@ class ConnectionManager:
     def disconnect(self, user_id: str):
         self.active_connections.pop(user_id, None)
 
+    def is_online(self, user_id: str) -> bool:
+        return user_id in self.active_connections
+
     async def send_to_user(self, user_id: str, data: dict):
         ws = self.active_connections.get(user_id)
         if ws:
@@ -32,8 +39,34 @@ class ConnectionManager:
         for uid in user_ids:
             await self.send_to_user(uid, data)
 
+    async def broadcast(self, data: dict):
+        for uid in list(self.active_connections.keys()):
+            await self.send_to_user(uid, data)
+
 
 manager = ConnectionManager()
+
+
+async def _set_user_status(user_id: str, online: bool):
+    """Update user.status / last_seen in DB and broadcast presence event."""
+    try:
+        import uuid as uuid_mod
+        async with async_session() as session:
+            u_r = await session.execute(select(User).where(User.id == uuid_mod.UUID(user_id)))
+            u = u_r.scalar_one_or_none()
+            if u:
+                u.status = "online" if online else "offline"
+                u.last_seen = datetime.utcnow()
+                await session.commit()
+                ls = u.last_seen.isoformat() if u.last_seen else None
+        await manager.broadcast({
+            "type": "presence",
+            "user_id": user_id,
+            "status": "online" if online else "offline",
+            "last_seen": ls if not online else None,
+        })
+    except Exception as e:
+        print(f"[presence] error: {e}")
 
 
 @router.websocket("/ws")
@@ -54,6 +87,7 @@ async def websocket_endpoint(websocket: WebSocket):
         return
 
     await manager.connect(websocket, user_id)
+    await _set_user_status(user_id, True)
     try:
         while True:
             data = await websocket.receive_json()
@@ -138,3 +172,4 @@ async def websocket_endpoint(websocket: WebSocket):
 
     except WebSocketDisconnect:
         manager.disconnect(user_id)
+        await _set_user_status(user_id, False)

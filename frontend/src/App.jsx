@@ -9,6 +9,7 @@ import ProfilePage from './pages/ProfilePage'
 import ChangePasswordPage from './pages/ChangePasswordPage'
 import CallModal from './components/CallModal'
 import ConfirmDialog from './components/ConfirmDialog'
+import Lightbox from './components/Lightbox'
 
 function ProtectedRoute({ children }) {
   const { token } = useAuthStore()
@@ -29,6 +30,7 @@ export default function App() {
       <Toaster position="top-center" toastOptions={{ style: { background: '#1f1f1f', color: '#f5f5f5', border: '1px solid #2a2a2a', fontFamily: '"Century Gothic", Arial, sans-serif' } }} />
       <CallModal />
       <ConfirmDialog />
+      <Lightbox />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/access-request" element={<AccessRequestPage />} />

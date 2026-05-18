@@ -1,7 +1,9 @@
 import { useState } from 'react'
-import { Search, Plus, LogOut, Shield, MessageCircle, Phone, Star, Newspaper, UserCircle } from 'lucide-react'
+import { Search, Plus, LogOut, Shield, MessageCircle, Phone, Star, Newspaper, UserCircle, Sun, Moon } from 'lucide-react'
 import { useAuthStore } from '../store/authStore'
 import { useChatStore } from '../store/chatStore'
+import { usePresenceStore } from '../store/presenceStore'
+import { useThemeStore } from '../store/themeStore'
 import { Link } from 'react-router-dom'
 import NewChatModal from './NewChatModal'
 import NotificationPanel from './NotificationPanel'
@@ -19,6 +21,7 @@ export default function Sidebar({ activeTab, onTabChange }) {
   })
 
   const isAdmin = user && ['super_admin', 'admin'].includes(user.role)
+  const { theme, toggleTheme } = useThemeStore()
 
   return (
     <div className="w-80 bg-dark-900 border-r border-dark-700 flex flex-col h-full">
@@ -34,6 +37,9 @@ export default function Sidebar({ activeTab, onTabChange }) {
           </div>
           <div className="flex gap-1">
             <NotificationPanel />
+            <button onClick={toggleTheme} className="p-2 rounded-lg hover:bg-dark-700 text-dark-400 hover:text-white transition-colors" title={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'}>
+              {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+            </button>
             <Link to="/profile" className="p-2 rounded-lg hover:bg-dark-700 text-dark-400 hover:text-white transition-colors" title="Профиль">
               <UserCircle size={18} />
             </Link>
@@ -92,16 +98,24 @@ export default function Sidebar({ activeTab, onTabChange }) {
 
 function ChatItem({ chat, user, isActive, onClick }) {
   const chatName = getChatName(chat, user)
+  const presence = usePresenceStore((s) => s.presence)
   const icon = chat.chat_type === 'saved' ? <Star size={14} className="text-yellow-400" /> :
                chat.is_news_channel ? <Newspaper size={14} className="text-green-400" /> : null
 
+  const otherMember = chat.chat_type === 'private' ? chat.members?.find((m) => m.user_id !== user?.id) : null
   const avatarUrl = chat.chat_type === 'private'
-    ? chat.members?.find((m) => m.user_id !== user?.id)?.avatar_url || chat.avatar_url
+    ? otherMember?.avatar_url || chat.avatar_url
     : chat.avatar_url
+  const isOnline = otherMember && (
+    presence[String(otherMember.user_id)]?.status === 'online' || otherMember.status === 'online'
+  )
 
   return (
     <div onClick={onClick} className={`flex items-center gap-3 px-4 py-3 cursor-pointer transition-all border-l-2 ${isActive ? 'bg-dark-800 border-primary-500' : 'border-transparent hover:bg-dark-800/50'}`}>
-      <Avatar name={chatName} url={avatarUrl} size="md" />
+      <div className="relative flex-shrink-0">
+        <Avatar name={chatName} url={avatarUrl} size="md" />
+        {isOnline && <span className="absolute bottom-0 right-0 w-3 h-3 rounded-full bg-green-500 border-2 border-dark-900" />}
+      </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between">
           <p className="font-medium text-white text-sm truncate flex items-center gap-1">{icon}{chatName}</p>

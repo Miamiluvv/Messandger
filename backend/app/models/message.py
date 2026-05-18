@@ -20,6 +20,7 @@ class Message(Base):
     is_edited = Column(Boolean, default=False)
     is_deleted = Column(Boolean, default=False)
     is_pinned = Column(Boolean, default=False)
+    allow_download = Column(Boolean, default=True)
     scheduled_at = Column(DateTime(timezone=True))
     is_scheduled = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)

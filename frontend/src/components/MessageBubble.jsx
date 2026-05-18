@@ -1,20 +1,24 @@
-import { useState, useRef, useEffect } from 'react'
-import { Reply, Pencil, Trash2, MoreHorizontal, Smile, Play, Pause, FileText, Download, Mic, Check, CheckCheck, Clock } from 'lucide-react'
+import { useState, useRef } from 'react'
+import { Reply, Pencil, Trash2, MoreHorizontal, Smile, Play, Pause, FileText, Download, Mic, Check, CheckCheck, Clock, Forward, Copy, Lock } from 'lucide-react'
 import api from '../api/axios'
-import Avatar from './Avatar'
 import PollMessage from './PollMessage'
+import ForwardMessageModal from './ForwardMessageModal'
+import { useLightboxStore } from '../store/lightboxStore'
+import toast from 'react-hot-toast'
 
 const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '👏', '🎉']
 
-export default function MessageBubble({ msg, isMine, onReply, onEdit, onDelete, chatId }) {
+export default function MessageBubble({ msg, isMine, onReply, onEdit, onDelete, onReplyClick, chatId }) {
   const [showMenu, setShowMenu] = useState(false)
   const [showEmojiPicker, setShowEmojiPicker] = useState(false)
   const [playing, setPlaying] = useState(false)
   const [voiceProgress, setVoiceProgress] = useState(0)
   const [voiceDuration, setVoiceDuration] = useState(0)
   const [voiceCurrentTime, setVoiceCurrentTime] = useState(0)
+  const [showForward, setShowForward] = useState(false)
   const audioRef = useRef(null)
   const [localReactions, setLocalReactions] = useState(msg.reactions || [])
+  const showLightbox = useLightboxStore((s) => s.show)
 
   if (msg.is_deleted) {
     return (
@@ -33,7 +37,7 @@ export default function MessageBubble({ msg, isMine, onReply, onEdit, onDelete, 
         setLocalReactions((prev) => [...prev, { emoji, user_id: 'me', id: res.data.id }])
       } else {
         setLocalReactions((prev) => {
-          const idx = prev.findIndex((r) => r.emoji === emoji && (r.user_id === 'me' || true))
+          const idx = prev.findIndex((r) => r.emoji === emoji)
           if (idx >= 0) return [...prev.slice(0, idx), ...prev.slice(idx + 1)]
           return prev
         })
@@ -42,58 +46,79 @@ export default function MessageBubble({ msg, isMine, onReply, onEdit, onDelete, 
     setShowEmojiPicker(false)
   }
 
+  const handleCopy = async () => {
+    try {
+      const txt = msg.content || ''
+      if (!txt) {
+        toast('Нечего копировать')
+      } else {
+        await navigator.clipboard.writeText(txt)
+        toast.success('Скопировано')
+      }
+    } catch {
+      toast.error('Не удалось скопировать')
+    }
+    setShowMenu(false)
+  }
+
   const isVoice = msg.message_type === 'voice'
-  const isFile = msg.message_type === 'file'
-  const isImage = msg.message_type === 'image'
-  const isVideo = msg.message_type === 'video'
   const isPoll = msg.message_type === 'poll'
+  const allowDownload = msg.allow_download !== false
+  const isForwarded = !!msg.forwarded_from_id
 
   return (
-    <div className={`flex ${isMine ? 'justify-end' : 'justify-start'} group mb-1`} onMouseLeave={() => { setShowMenu(false); setShowEmojiPicker(false) }}>
+    <div id={`msg-${msg.id}`} className={`flex ${isMine ? 'justify-end' : 'justify-start'} group mb-1`} onMouseLeave={() => { setShowMenu(false); setShowEmojiPicker(false) }}>
       <div className={`max-w-[70%] relative ${isMine ? 'order-2' : ''}`}>
         {/* Sender name for groups */}
         {!isMine && msg.sender_name && (
           <p className="text-xs text-primary-400 font-medium mb-0.5 ml-1">{msg.sender_name}</p>
         )}
 
-        {/* Reply preview */}
+        {/* Reply preview — clickable */}
         {msg.reply_to && (
-          <div className={`ml-1 mb-1 pl-2 border-l-2 border-primary-500 ${isMine ? 'border-primary-300' : ''}`}>
+          <button
+            type="button"
+            onClick={() => onReplyClick?.(msg.reply_to.id)}
+            className={`block w-full ml-1 mb-1 pl-2 pr-2 py-1 border-l-2 border-primary-500 text-left rounded-r-md hover:bg-dark-800/50 transition-colors ${isMine ? 'border-primary-300' : ''}`}
+            title="Перейти к исходному сообщению"
+          >
             <p className="text-[10px] text-primary-400 font-medium">{msg.reply_to.sender_name}</p>
-            <p className="text-[10px] text-dark-400 truncate">{msg.reply_to.content}</p>
-          </div>
+            <p className="text-[11px] text-dark-300 truncate">{msg.reply_to.content || '[вложение]'}</p>
+          </button>
         )}
 
         <div className={`${isMine ? 'chat-bubble-sent' : 'chat-bubble-received'} relative`}>
-          {/* Attachments (skipped for voice — rendered by custom waveform below) */}
+          {isForwarded && (
+            <div className="flex items-center gap-1 text-[10px] mb-1 opacity-80">
+              <Forward size={10} /> Переслано
+            </div>
+          )}
+
+          {/* Attachments (skip for voice — rendered by custom waveform below) */}
           {!isVoice && msg.attachments?.length > 0 && (
             <div className="mb-1 space-y-1">
               {msg.attachments.map((a) => (
                 <div key={a.id}>
                   {a.file_type?.startsWith('image') ? (
-                    <img src={a.file_url} alt={a.file_name} className="rounded-lg max-h-64 object-cover cursor-pointer hover:opacity-90" onClick={() => window.open(a.file_url, '_blank')} />
+                    <img
+                      src={a.file_url}
+                      alt={a.file_name}
+                      className="rounded-lg max-h-64 object-cover cursor-pointer hover:opacity-90"
+                      onClick={() => showLightbox(a.file_url, a.file_name, allowDownload)}
+                    />
                   ) : a.file_type?.startsWith('video') ? (
-                    <video src={a.file_url} controls className="rounded-lg max-h-48 w-full" />
+                    <video src={a.file_url} controls controlsList={allowDownload ? '' : 'nodownload'} className="rounded-lg max-h-48 w-full" />
                   ) : a.file_type?.startsWith('audio') ? (
-                    <audio src={a.file_url} controls className="w-full max-w-xs" />
+                    <audio src={a.file_url} controls controlsList={allowDownload ? '' : 'nodownload'} className="w-full max-w-xs" />
                   ) : (
-                    <a href={a.file_url} target="_blank" download className="flex items-center gap-2 bg-dark-700/50 rounded-lg p-2.5 hover:bg-dark-700 transition-colors">
-                      <div className="w-8 h-8 bg-primary-600/20 rounded-lg flex items-center justify-center flex-shrink-0">
-                        <FileText size={14} className="text-primary-400" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs text-white truncate">{a.file_name}</p>
-                        <p className="text-[10px] text-dark-400">{formatFileSize(a.file_size)}</p>
-                      </div>
-                      <Download size={14} className="text-dark-400" />
-                    </a>
+                    <FileAttachment a={a} allowDownload={allowDownload} />
                   )}
                 </div>
               ))}
             </div>
           )}
 
-          {/* Voice message */}
+          {/* Voice message — custom waveform */}
           {isVoice && msg.attachments?.[0] && (
             <div className="flex items-center gap-3 min-w-[220px] max-w-[280px]">
               <button onClick={() => {
@@ -106,7 +131,6 @@ export default function MessageBubble({ msg, isMine, onReply, onEdit, onDelete, 
               </button>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-1 mb-1.5">
-                  {/* Waveform bars */}
                   {Array.from({ length: 20 }).map((_, i) => {
                     const h = Math.sin(i * 0.8 + (msg.id?.charCodeAt?.(0) || 0)) * 0.5 + 0.5
                     const filled = voiceDuration > 0 ? (i / 20) <= voiceProgress : false
@@ -134,15 +158,16 @@ export default function MessageBubble({ msg, isMine, onReply, onEdit, onDelete, 
             </div>
           )}
 
-          {/* Poll */}
           {isPoll && msg.poll && <PollMessage poll={msg.poll} isMine={isMine} />}
 
-          {/* Text content */}
           {msg.content && !isVoice && !isPoll && (
             <p className="text-sm whitespace-pre-wrap break-words">{renderContent(msg.content)}</p>
           )}
 
           <div className="flex items-center justify-end gap-1 mt-0.5">
+            {!allowDownload && msg.attachments?.length > 0 && (
+              <Lock size={9} className={isMine ? 'text-primary-200/80' : 'text-dark-400'} aria-label="Скачивание запрещено" />
+            )}
             {msg.is_edited && <span className="text-[10px] text-dark-400 italic">ред.</span>}
             <span className={`text-[10px] ${isMine ? 'text-primary-200' : 'text-dark-400'}`}>{time}</span>
             {isMine && <MessageStatus msg={msg} />}
@@ -160,7 +185,7 @@ export default function MessageBubble({ msg, isMine, onReply, onEdit, onDelete, 
           </div>
         )}
 
-        {/* Context menu trigger */}
+        {/* Hover triggers */}
         <div className="absolute -top-2 right-0 opacity-0 group-hover:opacity-100 flex gap-0.5 transition-opacity">
           <button onClick={() => setShowEmojiPicker(!showEmojiPicker)} className="p-1 bg-dark-800 rounded-full border border-dark-600" title="Реакция">
             <Smile size={12} className="text-dark-400" />
@@ -170,7 +195,6 @@ export default function MessageBubble({ msg, isMine, onReply, onEdit, onDelete, 
           </button>
         </div>
 
-        {/* Emoji quick picker */}
         {showEmojiPicker && (
           <div className={`absolute top-6 ${isMine ? 'right-0' : 'left-0'} z-50 bg-dark-800 border border-dark-600 rounded-xl shadow-xl p-2 flex gap-1`}>
             {QUICK_EMOJIS.map((e) => (
@@ -181,12 +205,19 @@ export default function MessageBubble({ msg, isMine, onReply, onEdit, onDelete, 
           </div>
         )}
 
-        {/* Context menu */}
         {showMenu && (
-          <div className={`absolute top-6 ${isMine ? 'right-8' : 'left-8'} z-50 bg-dark-800 border border-dark-600 rounded-xl shadow-xl py-1 min-w-[140px]`}>
+          <div className={`absolute top-6 ${isMine ? 'right-8' : 'left-8'} z-50 bg-dark-800 border border-dark-600 rounded-xl shadow-xl py-1 min-w-[160px]`}>
             <button onClick={() => { onReply(msg); setShowMenu(false) }} className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-dark-300 hover:bg-dark-700 hover:text-white">
               <Reply size={12} /> Ответить
             </button>
+            <button onClick={() => { setShowForward(true); setShowMenu(false) }} className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-dark-300 hover:bg-dark-700 hover:text-white">
+              <Forward size={12} /> Переслать
+            </button>
+            {msg.content && (
+              <button onClick={handleCopy} className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-dark-300 hover:bg-dark-700 hover:text-white">
+                <Copy size={12} /> Копировать
+              </button>
+            )}
             {isMine && msg.message_type === 'text' && (
               <button onClick={() => { onEdit(msg); setShowMenu(false) }} className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-dark-300 hover:bg-dark-700 hover:text-white">
                 <Pencil size={12} /> Редактировать
@@ -200,14 +231,42 @@ export default function MessageBubble({ msg, isMine, onReply, onEdit, onDelete, 
           </div>
         )}
       </div>
+
+      {showForward && <ForwardMessageModal message={msg} onClose={() => setShowForward(false)} />}
     </div>
   )
 }
 
+function FileAttachment({ a, allowDownload }) {
+  const inner = (
+    <div className="flex items-center gap-2 bg-dark-700/50 rounded-lg p-2.5 hover:bg-dark-700 transition-colors">
+      <div className="w-8 h-8 bg-primary-600/20 rounded-lg flex items-center justify-center flex-shrink-0">
+        <FileText size={14} className="text-primary-400" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-xs text-white truncate">{a.file_name}</p>
+        <p className="text-[10px] text-dark-400">{formatFileSize(a.file_size)}</p>
+      </div>
+      {allowDownload ? <Download size={14} className="text-dark-400" /> : <Lock size={14} className="text-dark-500" />}
+    </div>
+  )
+  if (!allowDownload) {
+    return (
+      <div className="relative" title="Отправитель запретил скачивание">
+        {inner}
+      </div>
+    )
+  }
+  return (
+    <a href={a.file_url} target="_blank" download={a.file_name}>
+      {inner}
+    </a>
+  )
+}
+
 function MessageStatus({ msg }) {
-  // States: sending (optimistic), sent (default), read (is_read === true)
   if (msg.sending) return <Clock size={11} className="text-primary-200/70" />
-  if (msg.is_read) return <CheckCheck size={13} className="text-blue-300" />
+  if (msg.is_read) return <CheckCheck size={13} className="text-primary-100" />
   return <Check size={13} className="text-primary-200/90" />
 }
 

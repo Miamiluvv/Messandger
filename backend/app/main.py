@@ -45,6 +45,9 @@ async def scheduled_message_worker():
                         due.append(msg)
                 for msg in due:
                     msg.is_scheduled = False
+                    # Update created_at to actual dispatch moment so the message
+                    # appears in chat with the real send time, not original creation.
+                    msg.created_at = now_utc
                     sender = (await session.execute(select(User).where(User.id == msg.sender_id))).scalar_one_or_none()
                     members = (await session.execute(
                         select(ChatMember).where(ChatMember.chat_id == msg.chat_id)
@@ -71,6 +74,7 @@ async def scheduled_message_worker():
                         "type": "new_message",
                         "chat_id": str(msg.chat_id),
                         "message": payload,
+                        "is_scheduled_dispatch": True,
                     })
                 if due:
                     await session.commit()

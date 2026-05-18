@@ -19,13 +19,19 @@ export const useChatStore = create((set, get) => ({
 
   setActiveChat: async (chat) => {
     set({ activeChat: chat, messages: [], loadingMessages: true })
+    // Сразу обнуляем счётчик непрочитанных в локальном списке чатов
+    set((s) => ({
+      chats: s.chats.map((c) => c.id === chat.id ? { ...c, unread_count: 0 } : c),
+    }))
     try {
       const res = await api.get(`/chats/${chat.id}/messages`)
       set({ messages: res.data, loadingMessages: false })
       // Mark the latest message as read on the server (so other side's ticks update)
       const last = res.data[res.data.length - 1]
       if (last) {
-        api.post(`/chats/${chat.id}/read`, { message_id: last.id }).catch(() => {})
+        api.post(`/chats/${chat.id}/read`, { message_id: last.id })
+          .then(() => get().fetchChats())
+          .catch(() => {})
       }
     } catch (e) {
       set({ loadingMessages: false })

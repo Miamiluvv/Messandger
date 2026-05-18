@@ -265,6 +265,7 @@ async def search_users(q: str = "", db: AsyncSession = Depends(get_db), current_
     query = query.limit(50)
     result = await db.execute(query)
     users = result.scalars().all()
+    from app.routers.websocket import manager as ws_manager
     return [{
         "id": str(u.id),
         "email": u.email,
@@ -275,5 +276,26 @@ async def search_users(q: str = "", db: AsyncSession = Depends(get_db), current_
         "position": u.position,
         "role": u.role,
         "department_id": str(u.department_id) if u.department_id else None,
-        "status": u.status,
+        "status": "online" if ws_manager.is_online(str(u.id)) else (u.status or "offline"),
+        "last_seen": u.last_seen.isoformat() if u.last_seen else None,
     } for u in users]
+
+
+@router.get("/users/{user_id}/presence")
+async def user_presence(user_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    import uuid as uuid_mod
+    from app.routers.websocket import manager as ws_manager
+    try:
+        uid = uuid_mod.UUID(user_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Некорректный user_id")
+    res = await db.execute(select(User).where(User.id == uid))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    online = ws_manager.is_online(str(u.id))
+    return {
+        "user_id": str(u.id),
+        "status": "online" if online else (u.status or "offline"),
+        "last_seen": u.last_seen.isoformat() if u.last_seen else None,
+    }
