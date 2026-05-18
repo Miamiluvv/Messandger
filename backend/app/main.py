@@ -22,16 +22,27 @@ async def scheduled_message_worker():
 
     while True:
         try:
-            now = datetime.now(timezone.utc)
+            now_utc = datetime.now(timezone.utc)
+            now_naive = now_utc.replace(tzinfo=None)
             async with async_session() as session:
+                # Берём всех кандидатов; сравниваем в Python, чтобы корректно обрабатывать
+                # как timezone-aware, так и naive значения (SQLite хранит как строку).
                 result = await session.execute(
                     select(Message).where(
                         Message.is_scheduled == True,
                         Message.scheduled_at != None,
-                        Message.scheduled_at <= now,
                     )
                 )
-                due = result.scalars().all()
+                candidates = result.scalars().all()
+                due = []
+                for msg in candidates:
+                    sa = msg.scheduled_at
+                    if sa is None:
+                        continue
+                    # Нормализуем: naive считаем UTC.
+                    sa_cmp = sa if sa.tzinfo else sa.replace(tzinfo=timezone.utc)
+                    if sa_cmp <= now_utc:
+                        due.append(msg)
                 for msg in due:
                     msg.is_scheduled = False
                     sender = (await session.execute(select(User).where(User.id == msg.sender_id))).scalar_one_or_none()
@@ -63,6 +74,7 @@ async def scheduled_message_worker():
                     })
                 if due:
                     await session.commit()
+                    print(f"[scheduled_message_worker] dispatched {len(due)} message(s)")
         except Exception as e:
             print(f"[scheduled_message_worker] error: {e}")
         await asyncio.sleep(15)

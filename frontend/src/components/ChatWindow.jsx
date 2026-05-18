@@ -177,10 +177,17 @@ export default function ChatWindow() {
 
   const handleScheduleMessage = async () => {
     if (!inputText.trim() || !scheduleDate) return
+    // datetime-local даёт локальную строку без TZ; конвертируем в UTC ISO,
+    // чтобы backend (worker сравнивает по UTC) корректно сработал.
+    const isoUtc = new Date(scheduleDate).toISOString()
+    if (new Date(isoUtc).getTime() <= Date.now()) {
+      toast.error('Время отправки должно быть в будущем')
+      return
+    }
     try {
       await api.post(`/chats/${activeChat.id}/messages/schedule`, {
         content: inputText.trim(),
-        scheduled_at: scheduleDate,
+        scheduled_at: isoUtc,
       })
       toast.success('Сообщение запланировано')
       setInputText('')

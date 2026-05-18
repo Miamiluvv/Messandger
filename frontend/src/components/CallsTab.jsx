@@ -40,7 +40,8 @@ export default function CallsTab() {
         await api.post('/calls/schedule', {
           call_type: callType,
           participant_ids: selectedUsers.map(u => u.id),
-          scheduled_at: scheduleDate,
+          // Конвертируем локальное datetime-local в UTC ISO
+          scheduled_at: new Date(scheduleDate).toISOString(),
         })
         toast.success('Звонок запланирован')
       } else {

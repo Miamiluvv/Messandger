@@ -65,8 +65,8 @@ export default function MessageBubble({ msg, isMine, onReply, onEdit, onDelete, 
         )}
 
         <div className={`${isMine ? 'chat-bubble-sent' : 'chat-bubble-received'} relative`}>
-          {/* Attachments */}
-          {msg.attachments?.length > 0 && (
+          {/* Attachments (skipped for voice — rendered by custom waveform below) */}
+          {!isVoice && msg.attachments?.length > 0 && (
             <div className="mb-1 space-y-1">
               {msg.attachments.map((a) => (
                 <div key={a.id}>
