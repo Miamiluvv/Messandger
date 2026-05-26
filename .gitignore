@@ -39,3 +39,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Draw.io diagrams
+assets/figures/drawio/*.drawio
