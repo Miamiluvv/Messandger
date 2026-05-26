@@ -1,0 +1,55 @@
+<mxfile host="app.diagrams.net" modified="2026-05-26T19:30:00.000Z" agent="Cascade" version="24.0.0">
+  <diagram name="Диаграмма состояний сообщения" id="fig4-states">
+    <mxGraphModel dx="1422" dy="754" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="650" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="start" value="" style="ellipse;whiteSpace=wrap;html=1;fillColor=#000000;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="40" y="135" width="20" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="s_draft" value="Черновик" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="120" y="120" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="s_sent" value="Отправлено" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="320" y="120" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="s_failed" value="Не доставлено&#xa;(Failed)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="320" y="280" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="s_delivered" value="Доставлено" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="520" y="120" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="s_read" value="Прочитано" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="720" y="120" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="s_edit" value="Редактируется" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="520" y="280" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="s_pinned" value="Закреплено" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="720" y="280" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="s_deleted" value="Удалено" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="920" y="120" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="s_end" value="" style="ellipse;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1100" y="135" width="20" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="s_end_inner" value="" style="ellipse;whiteSpace=wrap;html=1;fillColor=#000000;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="1104" y="139" width="12" height="12" as="geometry" />
+        </mxCell>
+        <mxCell id="t1" value="create()" style="endArrow=open;html=1;rounded=0;fontSize=10;fontStyle=2" edge="1" parent="1" source="start" target="s_draft"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="t2" value="send()" style="endArrow=open;html=1;rounded=0;fontSize=10;fontStyle=2" edge="1" parent="1" source="s_draft" target="s_sent"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="t3" value="ws.ack" style="endArrow=open;html=1;rounded=0;fontSize=10;fontStyle=2" edge="1" parent="1" source="s_sent" target="s_delivered"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="t4" value="read()" style="endArrow=open;html=1;rounded=0;fontSize=10;fontStyle=2" edge="1" parent="1" source="s_delivered" target="s_read"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="t5" value="timeout 30 s" style="endArrow=open;html=1;rounded=0;fontSize=10;fontStyle=2;strokeColor=#b85450" edge="1" parent="1" source="s_sent" target="s_failed"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="t6" value="retry()" style="endArrow=open;html=1;exitX=0.25;exitY=0;entryX=0.25;entryY=1;rounded=0;fontSize=10;fontStyle=2;strokeColor=#82b366" edge="1" parent="1" source="s_failed" target="s_sent"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="t7" value="discard()" style="endArrow=open;html=1;rounded=0;fontSize=10;fontStyle=2;dashed=1" edge="1" parent="1" source="s_failed" target="s_deleted"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="t8" value="edit()" style="endArrow=open;html=1;exitX=0.75;exitY=1;entryX=0.25;entryY=0;rounded=0;fontSize=10;fontStyle=2" edge="1" parent="1" source="s_sent" target="s_edit"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="t9" value="save()" style="endArrow=open;html=1;exitX=0.75;exitY=0;entryX=0.5;entryY=1;rounded=0;fontSize=10;fontStyle=2" edge="1" parent="1" source="s_edit" target="s_sent"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="t10" value="pin()" style="endArrow=open;html=1;rounded=0;fontSize=10;fontStyle=2" edge="1" parent="1" source="s_delivered" target="s_pinned"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="t11" value="delete()" style="endArrow=open;html=1;rounded=0;fontSize=10;fontStyle=2" edge="1" parent="1" source="s_read" target="s_deleted"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="t12" value="" style="endArrow=open;html=1;rounded=0" edge="1" parent="1" source="s_deleted" target="s_end"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
