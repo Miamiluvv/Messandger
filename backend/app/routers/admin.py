@@ -337,3 +337,108 @@ async def reject_profile_request(request_id: str, db: AsyncSession = Depends(get
     req.reviewed_by = admin.id
     req.reviewed_at = datetime.utcnow()
     return {"message": "Запрос отклонён"}
+
+
+# ===========================================================================
+# АУДИТ / МОНИТОРИНГ / БЭКАПЫ
+# ===========================================================================
+
+from app.models.audit import AuditLog
+from app.services import metrics as _metrics
+from app.services import backup as _backup
+from app.services.audit import audit as _audit
+from app.routers.websocket import manager as _ws_manager
+from fastapi.responses import FileResponse
+import os as _os
+
+
+@router.get("/audit-log")
+async def get_audit_log(
+    action: str | None = None,
+    actor_id: str | None = None,
+    status_filter: str | None = None,
+    limit: int = 200,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Журнал аудита. Доступен только администраторам."""
+    q = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(min(max(1, limit), 1000))
+    if action:
+        q = q.where(AuditLog.action == action)
+    if status_filter:
+        q = q.where(AuditLog.status == status_filter)
+    if actor_id:
+        import uuid as _uuid
+        try:
+            q = q.where(AuditLog.actor_id == _uuid.UUID(actor_id))
+        except Exception:
+            pass
+    res = await db.execute(q)
+    rows = res.scalars().all()
+    return [{
+        "id": str(r.id),
+        "actor_id": str(r.actor_id) if r.actor_id else None,
+        "actor_email": r.actor_email,
+        "action": r.action,
+        "object_type": r.object_type,
+        "object_id": r.object_id,
+        "ip_address": r.ip_address,
+        "user_agent": r.user_agent,
+        "status": r.status,
+        "details": r.details,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    } for r in rows]
+
+
+@router.get("/metrics")
+async def get_metrics(admin: User = Depends(require_admin)):
+    """Текущие in-memory метрики приложения + параметры окружения."""
+    from app.config import settings as _settings
+    snap = _metrics.snapshot()
+    snap["ws_active"] = len(_ws_manager.active_connections)
+    snap["env"] = _settings.ENV
+    snap["db_url_kind"] = "sqlite" if "sqlite" in _settings.DATABASE_URL else "postgresql" if "postgresql" in _settings.DATABASE_URL else "other"
+    snap["db_encrypted"] = bool(_settings.DB_ENCRYPTION_KEY)
+    return snap
+
+
+@router.get("/backups")
+async def list_backups_endpoint(admin: User = Depends(require_admin)):
+    return _backup.list_backups()
+
+
+@router.post("/backups")
+async def create_backup_endpoint(admin: User = Depends(require_admin)):
+    """Создать бэкап БД немедленно."""
+    import asyncio as _asyncio
+    meta = await _asyncio.to_thread(_backup.create_backup_sync, "manual")
+    if not meta:
+        raise HTTPException(status_code=500, detail="Не удалось создать бэкап")
+    await _audit("backup_create", actor_id=str(admin.id), actor_email=admin.email,
+                 object_type="system", object_id=meta["file"], details=meta)
+    return meta
+
+
+@router.get("/backups/{filename}/download")
+async def download_backup(filename: str, admin: User = Depends(require_admin)):
+    # Защита от path traversal
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Недопустимое имя файла")
+    from app.config import settings as _settings
+    path = _os.path.join(_settings.BACKUP_DIR, filename)
+    if not _os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    await _audit("backup_download", actor_id=str(admin.id), actor_email=admin.email,
+                 object_type="system", object_id=filename)
+    return FileResponse(path, media_type="application/gzip", filename=filename)
+
+
+@router.get("/db-integrity")
+async def db_integrity(admin: User = Depends(require_admin)):
+    """Проверка целостности БД (PRAGMA integrity_check)."""
+    import asyncio as _asyncio
+    res = await _asyncio.to_thread(_backup.check_db_integrity_sync)
+    if not res["ok"]:
+        await _audit("db_integrity_fail", actor_id=str(admin.id), actor_email=admin.email,
+                     status="failed", details=res)
+    return res

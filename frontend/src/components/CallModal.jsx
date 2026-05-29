@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Phone, PhoneOff, Mic, MicOff, Video, VideoOff, Monitor, MonitorOff, UserPlus, X } from 'lucide-react'
+import { Phone, PhoneOff, Mic, MicOff, Video, VideoOff, Monitor, MonitorOff, UserPlus, X, Radio, Users } from 'lucide-react'
 import { useCallStore } from '../store/callStore'
 import { useWebSocketStore } from '../store/websocketStore'
 import { useAuthStore } from '../store/authStore'
 import api from '../api/axios'
 import toast from 'react-hot-toast'
+import Avatar from './Avatar'
 
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -124,32 +125,63 @@ export default function CallModal() {
   }, [activeCall, peerConnections, createPeerConnection, ws])
 
   // Start outgoing call
-  const startCall = useCallback(async (callType, participantIds, callId) => {
+  const startCall = useCallback(async (callType, participantIds, callId, isBroadcast = false) => {
     try {
+      // Fetch participant info
+      const participantsInfo = await Promise.all(
+        participantIds.map(async (id) => {
+          try {
+            const res = await api.get(`/auth/users/${id}`)
+            return {
+              user_id: id,
+              first_name: res.data.first_name,
+              last_name: res.data.last_name,
+              avatar_url: res.data.avatar_url,
+            }
+          } catch (e) {
+            return { user_id: id, first_name: 'Unknown', last_name: '', avatar_url: null }
+          }
+        })
+      )
+
       const constraints = { audio: true, video: callType === 'video' }
       const stream = await navigator.mediaDevices.getUserMedia(constraints)
       setLocalStream(stream)
-      setCallStatus('ringing')
-      setActiveCall({ id: callId, type: callType, participants: participantIds, isOutgoing: true })
+      
+      // Для трансляций сразу active, для обычных звонков - ringing
+      const initialStatus = isBroadcast ? 'active' : 'ringing'
+      setCallStatus(initialStatus)
+      setActiveCall({ id: callId, type: callType, participants: participantsInfo, isOutgoing: true, isBroadcast })
 
-      // Send invite via WS
-      ws?.send(JSON.stringify({
-        type: 'call_invite',
-        call_id: callId,
-        call_type: callType,
-        from_name: `${user?.first_name} ${user?.last_name}`,
-        from_avatar: user?.avatar_url,
-        recipients: participantIds,
-      }))
+      // Send invite via WS (только для обычных звонков)
+      if (!isBroadcast) {
+        ws?.send(JSON.stringify({
+          type: 'call_invite',
+          call_id: callId,
+          call_type: callType,
+          from_name: `${user?.first_name} ${user?.last_name}`,
+          from_avatar: user?.avatar_url,
+          recipients: participantIds,
+        }))
 
-      // Timeout if no answer
-      setTimeout(() => {
-        const state = useCallStore.getState()
-        if (state.callStatus === 'ringing') {
-          endCall()
-          toast.error('Нет ответа')
-        }
-      }, 30000)
+        // Timeout if no answer
+        setTimeout(() => {
+          const state = useCallStore.getState()
+          if (state.callStatus === 'ringing') {
+            endCall()
+            toast.error('Нет ответа')
+          }
+        }, 30000)
+      } else {
+        // Для трансляций уведомляем всех участников канала
+        ws?.send(JSON.stringify({
+          type: 'broadcast_started',
+          call_id: callId,
+          call_type: callType,
+          from_name: `${user?.first_name} ${user?.last_name}`,
+          from_avatar: user?.avatar_url,
+        }))
+      }
     } catch (err) {
       toast.error('Нет доступа к микрофону/камере')
       cleanup()
@@ -160,13 +192,32 @@ export default function CallModal() {
   const acceptCall = useCallback(async () => {
     if (!incomingCall) return
     try {
+      // Fetch caller info
+      let callerInfo
+      try {
+        const res = await api.get(`/auth/users/${incomingCall.from_user}`)
+        callerInfo = {
+          user_id: incomingCall.from_user,
+          first_name: res.data.first_name,
+          last_name: res.data.last_name,
+          avatar_url: res.data.avatar_url,
+        }
+      } catch (e) {
+        callerInfo = {
+          user_id: incomingCall.from_user,
+          first_name: incomingCall.from_name || 'Unknown',
+          last_name: '',
+          avatar_url: incomingCall.from_avatar || null,
+        }
+      }
+
       const constraints = { audio: true, video: incomingCall.call_type === 'video' }
       const stream = await navigator.mediaDevices.getUserMedia(constraints)
       setLocalStream(stream)
       setActiveCall({
         id: incomingCall.call_id,
         type: incomingCall.call_type,
-        participants: [incomingCall.from_user],
+        participants: [callerInfo],
         isOutgoing: false
       })
       setCallStatus('connecting')
@@ -250,7 +301,7 @@ export default function CallModal() {
   const toggleScreenShare = useCallback(async () => {
     if (isScreenSharing) {
       // Switch back to camera
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: activeCall?.type === 'video' })
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true })
       setLocalStream(stream)
       setScreenSharing(false)
       // Replace tracks in peer connections
@@ -262,13 +313,15 @@ export default function CallModal() {
       })
     } else {
       try {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
         const videoTrack = screenStream.getVideoTracks()[0]
+        const audioTrack = screenStream.getAudioTracks()[0]
         videoTrack.onended = () => toggleScreenShare()
 
-        // Keep audio from localStream
+        // Combine audio tracks - prefer screen audio if available, otherwise keep mic
+        const audioTracks = audioTrack ? [audioTrack] : localStream.getAudioTracks()
         const newStream = new MediaStream([
-          ...localStream.getAudioTracks(),
+          ...audioTracks,
           videoTrack
         ])
         setLocalStream(newStream)
@@ -278,9 +331,16 @@ export default function CallModal() {
         Object.values(peerConnections).forEach(pc => {
           const sender = pc.getSenders().find(s => s.track?.kind === 'video')
           if (sender) sender.replaceTrack(videoTrack)
+          
+          // Also replace audio track if screen audio is available
+          if (audioTrack) {
+            const audioSender = pc.getSenders().find(s => s.track?.kind === 'audio')
+            if (audioSender) audioSender.replaceTrack(audioTrack)
+          }
         })
       } catch (e) {
-        // User cancelled screen share picker
+        console.error('Screen share error:', e)
+        toast.error('Не удалось начать демонстрацию экрана')
       }
     }
   }, [isScreenSharing, activeCall, localStream, peerConnections, setLocalStream, setScreenSharing])
@@ -338,6 +398,8 @@ export default function CallModal() {
   if (!activeCall) return null
 
   const isVideo = activeCall.type === 'video'
+  const isBroadcast = activeCall.isBroadcast
+  const isOutgoing = activeCall.isOutgoing
   const remoteStreamEntries = Object.entries(remoteStreams)
 
   return (
@@ -346,79 +408,201 @@ export default function CallModal() {
       <div className="flex items-center justify-between px-6 py-4">
         <div>
           <h3 className="text-white font-bold text-sm">
-            {callStatus === 'ringing' ? 'Вызов...' : callStatus === 'connecting' ? 'Подключение...' : 'Звонок'}
+            {isBroadcast ? 'Трансляция' : callStatus === 'ringing' ? 'Вызов...' : callStatus === 'connecting' ? 'Подключение...' : 'Звонок'}
           </h3>
           {callStatus === 'active' && (
             <span className="text-dark-400 text-xs">{formatTime(callDuration)}</span>
           )}
         </div>
-        <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${isVideo ? 'bg-blue-600/20 text-blue-400' : 'bg-green-600/20 text-green-400'}`}>
-          {isVideo ? 'Видео' : 'Аудио'}
+        <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${isBroadcast ? 'bg-red-600/20 text-red-400' : isVideo ? 'bg-blue-600/20 text-blue-400' : 'bg-green-600/20 text-green-400'}`}>
+          {isBroadcast ? 'Трансляция' : isVideo ? 'Видео' : 'Аудио'}
         </span>
       </div>
 
       {/* Video area */}
-      <div className="flex-1 relative flex items-center justify-center bg-dark-950">
-        {/* Remote streams */}
-        {remoteStreamEntries.length > 0 ? (
-          <div className={`grid gap-2 w-full h-full p-4 ${remoteStreamEntries.length > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
-            {remoteStreamEntries.map(([peerId, stream]) => (
-              <div key={peerId} className="relative rounded-2xl overflow-hidden bg-dark-800">
-                <video
-                  ref={el => { if (el) remoteVideoRefs.current[peerId] = el }}
-                  autoPlay
-                  playsInline
-                  className="w-full h-full object-cover"
-                />
+      <div className="flex-1 relative flex items-center justify-center bg-dark-950 overflow-hidden pb-20">
+        {/* Broadcast mode: show broadcaster on main screen */}
+        {isBroadcast ? (
+          <>
+            {/* Если я ведущий - показываю свой stream на большом экране */}
+            {isOutgoing && localStream && isVideo ? (
+              <div className="w-full h-full absolute inset-0">
+                <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
+                <div className="absolute bottom-4 left-4 flex items-center gap-2 z-10">
+                  <Avatar 
+                    name={`${user?.first_name} ${user?.last_name}`} 
+                    url={user?.avatar_url} 
+                    size="md" 
+                  />
+                  <span className="text-white text-sm font-medium bg-black/50 px-3 py-1.5 rounded">
+                    Вы (ведущий)
+                  </span>
+                </div>
               </div>
-            ))}
-          </div>
+            ) : (
+              /* Если я зритель - показываю stream ведущего */
+              remoteStreamEntries.length > 0 ? (
+                <div className="w-full h-full absolute inset-0">
+                  {remoteStreamEntries.map(([peerId, stream]) => {
+                    const participant = activeCall?.participants?.find(p => p.user_id === peerId)
+                    const participantName = participant ? `${participant.first_name} ${participant.last_name}` : 'Ведущий'
+                    return (
+                      <div key={peerId} className="w-full h-full relative">
+                        <video
+                          ref={el => { if (el) remoteVideoRefs.current[peerId] = el }}
+                          autoPlay
+                          playsInline
+                          className="w-full h-full object-cover"
+                        />
+                        <div className="absolute bottom-4 left-4 flex items-center gap-2 z-10">
+                          <Avatar 
+                            name={participantName} 
+                            url={participant?.avatar_url} 
+                            size="md" 
+                          />
+                          <span className="text-white text-sm font-medium bg-black/50 px-3 py-1.5 rounded">
+                            {participantName}
+                          </span>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="text-center">
+                  <div className="w-24 h-24 rounded-full bg-dark-800 mx-auto mb-4 flex items-center justify-center">
+                    <Radio size={36} className="text-red-400 animate-pulse" />
+                  </div>
+                  <p className="text-dark-400 text-sm">Ожидание трансляции...</p>
+                </div>
+              )
+            )}
+            
+            {/* Local video for viewers (picture-in-picture) */}
+            {!isOutgoing && localStream && isVideo && (
+              <div className="absolute bottom-4 right-4 w-40 h-28 rounded-xl overflow-hidden border-2 border-dark-600 shadow-xl bg-dark-900 z-10">
+                <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
+                <div className="absolute bottom-2 left-2 flex items-center gap-2">
+                  <Avatar 
+                    name={`${user?.first_name} ${user?.last_name}`} 
+                    url={user?.avatar_url} 
+                    size="sm" 
+                  />
+                  <span className="text-white text-xs font-medium bg-black/50 px-2 py-1 rounded">
+                    Вы
+                  </span>
+                </div>
+              </div>
+            )}
+          </>
         ) : (
-          <div className="text-center">
-            <div className="w-24 h-24 rounded-full bg-dark-800 mx-auto mb-4 flex items-center justify-center">
-              <Phone size={36} className={`text-dark-400 ${callStatus === 'ringing' ? 'animate-bounce' : ''}`} />
-            </div>
-            <p className="text-dark-400 text-sm">
-              {callStatus === 'ringing' ? 'Ожидание ответа...' : callStatus === 'connecting' ? 'Подключение...' : 'Звонок активен'}
-            </p>
-          </div>
-        )}
+          /* Regular call mode */
+          <>
+            {/* Remote streams */}
+            {remoteStreamEntries.length > 0 ? (
+              <div className={`grid gap-2 w-full h-full p-4 ${remoteStreamEntries.length > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                {remoteStreamEntries.map(([peerId, stream]) => {
+                  const participant = activeCall?.participants?.find(p => p.user_id === peerId)
+                  const participantName = participant ? `${participant.first_name} ${participant.last_name}` : 'Участник'
+                  return (
+                    <div key={peerId} className="relative rounded-2xl overflow-hidden bg-dark-800">
+                      <video
+                        ref={el => { if (el) remoteVideoRefs.current[peerId] = el }}
+                        autoPlay
+                        playsInline
+                        className="w-full h-full object-cover"
+                      />
+                      {/* Avatar overlay */}
+                      <div className="absolute bottom-3 left-3 flex items-center gap-2">
+                        <Avatar 
+                          name={participantName} 
+                          url={participant?.avatar_url} 
+                          size="sm" 
+                        />
+                        <span className="text-white text-xs font-medium bg-black/50 px-2 py-1 rounded">
+                          {participantName}
+                        </span>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : (
+              <div className="text-center">
+                <div className="w-24 h-24 rounded-full bg-dark-800 mx-auto mb-4 flex items-center justify-center">
+                  <Phone size={36} className={`text-dark-400 ${callStatus === 'ringing' ? 'animate-bounce' : ''}`} />
+                </div>
+                <p className="text-dark-400 text-sm">
+                  {callStatus === 'ringing' ? 'Ожидание ответа...' : callStatus === 'connecting' ? 'Подключение...' : 'Звонок активен'}
+                </p>
+              </div>
+            )}
 
-        {/* Local video (picture-in-picture) */}
-        {localStream && (isVideo || isScreenSharing) && (
-          <div className="absolute bottom-4 right-4 w-40 h-28 rounded-xl overflow-hidden border-2 border-dark-600 shadow-xl bg-dark-900">
-            <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
-          </div>
+            {/* Local video (picture-in-picture) */}
+            {localStream && (isVideo || isScreenSharing) && (
+              <div className="absolute bottom-4 right-4 w-40 h-28 rounded-xl overflow-hidden border-2 border-dark-600 shadow-xl bg-dark-900">
+                <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
+                <div className="absolute bottom-2 left-2 flex items-center gap-2">
+                  <Avatar 
+                    name={`${user?.first_name} ${user?.last_name}`} 
+                    url={user?.avatar_url} 
+                    size="sm" 
+                  />
+                  <span className="text-white text-xs font-medium bg-black/50 px-2 py-1 rounded">
+                    Вы
+                  </span>
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
 
       {/* Controls */}
-      <div className="flex items-center justify-center gap-4 py-6 px-4 bg-dark-900/80 border-t border-dark-800">
-        <button onClick={toggleMute}
-          className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${isMuted ? 'bg-red-600 text-white' : 'bg-dark-700 text-white hover:bg-dark-600'}`}
-          title={isMuted ? 'Включить микрофон' : 'Выключить микрофон'}>
-          {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
-        </button>
-
-        {isVideo && (
-          <button onClick={toggleCamera}
-            className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${isCameraOff ? 'bg-red-600 text-white' : 'bg-dark-700 text-white hover:bg-dark-600'}`}
-            title={isCameraOff ? 'Включить камеру' : 'Выключить камеру'}>
-            {isCameraOff ? <VideoOff size={20} /> : <Video size={20} />}
-          </button>
+      <div className="absolute bottom-0 left-0 right-0 flex items-center justify-between px-6 py-4 bg-dark-900/90 border-t border-dark-800 z-20">
+        {/* Left side: viewer count for broadcasts */}
+        {isBroadcast && (
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-dark-800 rounded-lg">
+              <Users size={16} className="text-dark-400" />
+              <span className="text-white text-sm font-medium">
+                {remoteStreamEntries.length + (isOutgoing ? 0 : 1)} зритель{remoteStreamEntries.length + (isOutgoing ? 0 : 1) !== 1 ? (remoteStreamEntries.length + (isOutgoing ? 0 : 1) > 4 ? 'ей' : 'я') : ''}
+              </span>
+            </div>
+          </div>
         )}
 
-        <button onClick={toggleScreenShare}
-          className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${isScreenSharing ? 'bg-blue-600 text-white' : 'bg-dark-700 text-white hover:bg-dark-600'}`}
-          title={isScreenSharing ? 'Остановить демонстрацию' : 'Демонстрация экрана'}>
-          {isScreenSharing ? <MonitorOff size={20} /> : <Monitor size={20} />}
-        </button>
+        {/* Center: main controls */}
+        <div className="flex items-center justify-center gap-4">
+          <button onClick={toggleMute}
+            className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${isMuted ? 'bg-red-600 text-white' : 'bg-dark-700 text-white hover:bg-dark-600'}`}
+            title={isMuted ? 'Включить микрофон' : 'Выключить микрофон'}>
+            {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
+          </button>
 
-        <button onClick={endCall}
-          className="w-14 h-14 rounded-full bg-red-600 hover:bg-red-700 flex items-center justify-center text-white transition-colors shadow-lg"
-          title="Завершить звонок">
-          <PhoneOff size={22} />
-        </button>
+          {isVideo && (
+            <button onClick={toggleCamera}
+              className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${isCameraOff ? 'bg-red-600 text-white' : 'bg-dark-700 text-white hover:bg-dark-600'}`}
+              title={isCameraOff ? 'Включить камеру' : 'Выключить камеру'}>
+              {isCameraOff ? <VideoOff size={20} /> : <Video size={20} />}
+            </button>
+          )}
+
+          <button onClick={toggleScreenShare}
+            className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${isScreenSharing ? 'bg-blue-600 text-white' : 'bg-dark-700 text-white hover:bg-dark-600'}`}
+            title={isScreenSharing ? 'Остановить демонстрацию' : 'Демонстрация экрана'}>
+            {isScreenSharing ? <MonitorOff size={20} /> : <Monitor size={20} />}
+          </button>
+
+          <button onClick={endCall}
+            className={`w-14 h-14 rounded-full flex items-center justify-center text-white transition-colors shadow-lg ${isBroadcast && isOutgoing ? 'bg-red-600 hover:bg-red-700' : 'bg-red-600 hover:bg-red-700'}`}
+            title={isBroadcast && isOutgoing ? 'Завершить трансляцию' : isBroadcast ? 'Выйти из трансляции' : 'Завершить звонок'}>
+            <PhoneOff size={22} />
+          </button>
+        </div>
+
+        {/* Right side: spacer for balance */}
+        {isBroadcast && <div className="w-32" />}
       </div>
     </div>
   )

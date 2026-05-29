@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from fastapi import FastAPI
@@ -7,9 +8,17 @@ from fastapi.staticfiles import StaticFiles
 import os
 import uuid
 
-from app.config import settings
+from app.config import settings, validate_security_config
 from app.database import init_db, async_session
+from app.middleware import register_middleware, register_exception_handlers
+from app.services.backup import backup_worker
 from app.routers import auth, chats, websocket, admin, calls, polls, notifications
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger("app")
 
 
 async def scheduled_message_worker():
@@ -149,17 +158,23 @@ async def seed_data():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_security_config()
+    os.makedirs(settings.BACKUP_DIR, exist_ok=True)
     await init_db()
     await seed_data()
     worker_task = asyncio.create_task(scheduled_message_worker())
+    backup_task = asyncio.create_task(backup_worker())
+    logger.info("✓ Приложение запущено (env=%s)", settings.ENV)
     try:
         yield
     finally:
-        worker_task.cancel()
-        try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
+        for t in (worker_task, backup_task):
+            t.cancel()
+        for t in (worker_task, backup_task):
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(
@@ -174,19 +189,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-Id", "X-Response-Time-Ms"],
 )
 
-
-@app.middleware("http")
-async def security_headers_middleware(request, call_next):
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(self), camera=(self), display-capture=(self)"
-    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    response.headers["X-XSS-Protection"] = "0"
-    return response
+# Подключаем обработчики ошибок, rate-limit, security headers, request_id, метрики
+register_exception_handlers(app)
+register_middleware(app)
 
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")

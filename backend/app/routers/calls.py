@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,14 +9,39 @@ from app.database import get_db
 from app.models.user import User
 from app.models.call import Call, CallParticipant
 from app.services.auth import get_current_user
+from sqlalchemy.orm import selectinload
 
 router = APIRouter(prefix="/api/calls", tags=["calls"])
+
+
+def get_avatar_url(user, current_user):
+    """Apply avatar visibility logic"""
+    if not user or not user.avatar_url:
+        return None
+    visibility = user.avatar_visibility or "all"
+    if visibility == "all":
+        return user.avatar_url
+    elif visibility == "selected":
+        if user.avatar_visibility_list:
+            allowed_ids = json.loads(user.avatar_visibility_list)
+            return user.avatar_url if str(current_user.id) in allowed_ids else None
+        else:
+            return None
+    elif visibility == "except":
+        if user.avatar_visibility_list:
+            excluded_ids = json.loads(user.avatar_visibility_list)
+            return user.avatar_url if str(current_user.id) not in excluded_ids else None
+        else:
+            return user.avatar_url
+    return user.avatar_url
 
 
 @router.get("/")
 async def get_calls(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(
-        select(Call).join(CallParticipant).where(
+        select(Call)
+        .options(selectinload(Call.participants).selectinload(CallParticipant.user))
+        .join(CallParticipant).where(
             CallParticipant.user_id == current_user.id
         ).order_by(Call.created_at.desc()).limit(50)
     )
@@ -35,6 +61,9 @@ async def get_calls(db: AsyncSession = Depends(get_db), current_user: User = Dep
             "created_at": c.created_at.isoformat() if c.created_at else None,
             "participants": [{
                 "user_id": str(p.user_id),
+                "first_name": p.user.first_name if p.user else None,
+                "last_name": p.user.last_name if p.user else None,
+                "avatar_url": get_avatar_url(p.user, current_user) if p.user else None,
                 "is_muted": p.is_muted,
                 "is_camera_off": p.is_camera_off,
                 "is_screen_sharing": p.is_screen_sharing,
@@ -46,24 +75,52 @@ async def get_calls(db: AsyncSession = Depends(get_db), current_user: User = Dep
 @router.post("/")
 async def start_call(data: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     import uuid as uuid_mod
+    from app.models.chat import Chat, ChatMember
+
+    chat_uuid = uuid_mod.UUID(data["chat_id"]) if data.get("chat_id") else None
+
+    # ── Проверка прав на звонок в каналах ──────────────────────────────
+    if chat_uuid:
+        ch_res = await db.execute(select(Chat).where(Chat.id == chat_uuid))
+        chat = ch_res.scalar_one_or_none()
+        if chat and (chat.chat_type == "channel" or chat.is_news_channel):
+            # Только владелец/админ канала может начать трансляцию
+            mem_res = await db.execute(
+                select(ChatMember).where(
+                    ChatMember.chat_id == chat_uuid,
+                    ChatMember.user_id == current_user.id,
+                )
+            )
+            mem = mem_res.scalar_one_or_none()
+            if not mem or mem.role not in ("owner", "admin"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="В каналах звонки запрещены. Только администратор канала может начать трансляцию.",
+                )
+
+    # Для каналов трансляция начинается сразу (active), для обычных чатов - ringing
+    is_broadcast = data.get("is_broadcast", False)
+    initial_status = "active" if is_broadcast else "ringing"
+    
     call = Call(
-        chat_id=uuid_mod.UUID(data["chat_id"]) if data.get("chat_id") else None,
+        chat_id=chat_uuid,
         initiator_id=current_user.id,
         call_type=data.get("call_type", "audio"),
-        status="ringing",
-        started_at=datetime.utcnow(),
+        status=initial_status,
+        started_at=datetime.utcnow() if is_broadcast else None,
     )
     db.add(call)
     await db.flush()
 
     # Добавить инициатора как участника
-    db.add(CallParticipant(call_id=call.id, user_id=current_user.id, joined_at=datetime.utcnow()))
+    db.add(CallParticipant(call_id=call.id, user_id=current_user.id, joined_at=datetime.utcnow() if is_broadcast else None))
 
-    # Добавить остальных участников
-    for uid in data.get("participant_ids", []):
-        db.add(CallParticipant(call_id=call.id, user_id=uuid_mod.UUID(uid)))
+    # Добавить остальных участников (для обычных звонков)
+    if not is_broadcast:
+        for uid in data.get("participant_ids", []):
+            db.add(CallParticipant(call_id=call.id, user_id=uuid_mod.UUID(uid)))
 
-    return {"id": str(call.id), "status": "ringing"}
+    return {"id": str(call.id), "status": initial_status}
 
 
 @router.post("/schedule")
@@ -117,6 +174,8 @@ async def join_call(call_id: str, db: AsyncSession = Depends(get_db), current_us
 @router.post("/{call_id}/leave")
 async def leave_call(call_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     import uuid as uuid_mod
+    from app.models.chat import Chat
+    
     result = await db.execute(
         select(CallParticipant).where(CallParticipant.call_id == uuid_mod.UUID(call_id), CallParticipant.user_id == current_user.id)
     )
@@ -124,23 +183,34 @@ async def leave_call(call_id: str, db: AsyncSession = Depends(get_db), current_u
     if participant:
         participant.left_at = datetime.utcnow()
 
-    # Если все покинули — завершить
+    # Если все покинули — завершить (кроме трансляций в каналах)
     call_result = await db.execute(select(Call).where(Call.id == uuid_mod.UUID(call_id)))
     call = call_result.scalar_one_or_none()
     if call:
-        active_result = await db.execute(
-            select(CallParticipant).where(
-                CallParticipant.call_id == call.id,
-                CallParticipant.joined_at != None,
-                CallParticipant.left_at == None
+        # Проверяем, является ли это трансляцией в канале
+        is_broadcast = False
+        if call.chat_id:
+            chat_result = await db.execute(select(Chat).where(Chat.id == call.chat_id))
+            chat = chat_result.scalar_one_or_none()
+            if chat and (chat.chat_type == "channel" or chat.is_news_channel):
+                is_broadcast = True
+        
+        # Для обычных звонков завершаем, когда все покинули
+        # Для трансляций в каналах - только владелец может завершить через /end
+        if not is_broadcast:
+            active_result = await db.execute(
+                select(CallParticipant).where(
+                    CallParticipant.call_id == call.id,
+                    CallParticipant.joined_at != None,
+                    CallParticipant.left_at == None
+                )
             )
-        )
-        active = active_result.scalars().all()
-        if len(active) == 0:
-            call.status = "ended"
-            call.ended_at = datetime.utcnow()
-            if call.started_at:
-                call.duration = int((call.ended_at - call.started_at).total_seconds())
+            active = active_result.scalars().all()
+            if len(active) == 0:
+                call.status = "ended"
+                call.ended_at = datetime.utcnow()
+                if call.started_at:
+                    call.duration = int((call.ended_at - call.started_at).total_seconds())
 
     return {"status": "left"}
 

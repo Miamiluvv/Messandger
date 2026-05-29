@@ -183,7 +183,8 @@ function CallItem({ call, currentUserId }) {
                <PhoneIncoming size={16} className="text-primary-400" />
 
   const typeIcon = call.call_type === 'video' ? <Video size={14} /> : <Phone size={14} />
-  const time = call.created_at ? new Date(call.created_at).toLocaleString('ru', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''
+  const createdDate = call.created_at ? new Date(call.created_at) : null
+  const time = createdDate ? new Date(createdDate.getTime() + 3 * 60 * 60 * 1000).toLocaleString('ru', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''
   const duration = call.duration ? `${Math.floor(call.duration / 60)}:${(call.duration % 60).toString().padStart(2, '0')}` : ''
 
   const statusLabels = { ringing: 'Звонит...', active: 'Активный', ended: 'Завершён', missed: 'Пропущен', scheduled: 'Запланирован' }
@@ -210,7 +211,7 @@ function CallItem({ call, currentUserId }) {
           {duration && <span className="text-xs text-dark-500">({duration})</span>}
         </div>
         {call.status === 'scheduled' && call.scheduled_at && (
-          <p className="text-xs text-orange-400 mt-0.5 flex items-center gap-1"><Clock size={10} /> {new Date(call.scheduled_at).toLocaleString('ru')}</p>
+          <p className="text-xs text-orange-400 mt-0.5 flex items-center gap-1"><Clock size={10} /> {new Date(new Date(call.scheduled_at).getTime() + 3 * 60 * 60 * 1000).toLocaleString('ru', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</p>
         )}
       </div>
       {call.status === 'active' && (

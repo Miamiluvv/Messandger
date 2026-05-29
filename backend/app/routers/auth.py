@@ -5,13 +5,14 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, and_
 
 from app.config import settings
 from app.database import get_db
 from app.models.user import User, AccessRequest, Department, Division, ProfileChangeRequest
 from app.models.chat import Chat, ChatMember
 from app.services.auth import get_password_hash, verify_password, create_access_token, get_current_user
+from app.services.audit import audit
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -72,12 +73,20 @@ async def login(data: dict, request: Request, db: AsyncSession = Depends(get_db)
     user = result.scalar_one_or_none()
     if not user or not verify_password(password, user.password_hash):
         _record_login_failure(rate_key)
+        await audit(
+            "login_failed", actor_email=email, request=request,
+            object_type="user", object_id=str(user.id) if user else None,
+            status="failed", details={"reason": "bad_credentials"},
+        )
         raise HTTPException(status_code=401, detail="Неверный email или пароль")
     if not user.is_active:
+        await audit("login_blocked", actor_id=str(user.id), actor_email=email, request=request, status="failed", details={"reason": "inactive"})
         raise HTTPException(status_code=403, detail="Аккаунт деактивирован")
     if user.is_blocked:
+        await audit("login_blocked", actor_id=str(user.id), actor_email=email, request=request, status="failed", details={"reason": "blocked"})
         raise HTTPException(status_code=403, detail="Аккаунт заблокирован. Обратитесь в Управление информатизации")
     if user.is_frozen:
+        await audit("login_blocked", actor_id=str(user.id), actor_email=email, request=request, status="failed", details={"reason": "frozen"})
         raise HTTPException(status_code=403, detail="Аккаунт заморожен. Обратитесь в Управление информатизации")
 
     # Проверка истечения пароля
@@ -87,6 +96,11 @@ async def login(data: dict, request: Request, db: AsyncSession = Depends(get_db)
 
     _reset_login_attempts(rate_key)
     token = create_access_token(data={"sub": str(user.id)})
+    await audit(
+        "login_success", actor_id=str(user.id), actor_email=email, request=request,
+        object_type="user", object_id=str(user.id),
+        details={"password_expired": password_expired},
+    )
     return {
         "access_token": token,
         "token_type": "bearer",
@@ -153,6 +167,17 @@ async def get_divisions(department_id: str, db: AsyncSession = Depends(get_db)):
 # ПРОФИЛЬ
 # ===========================================================================
 
+@router.post("/refresh")
+async def refresh_token(current_user: User = Depends(get_current_user)):
+    """Скользящее продление сессии. Клиент периодически дергает этот эндпоинт,
+    пока токен ещё валиден; в ответ получает свежий JWT с новым `exp`.
+    Если токен истёк или пользователь заблокирован — 401/403, клиент уйдёт на /login."""
+    if not current_user.is_active or current_user.is_blocked or current_user.is_frozen:
+        raise HTTPException(status_code=403, detail="Аккаунт недоступен")
+    new_token = create_access_token(data={"sub": str(current_user.id)})
+    return {"access_token": new_token, "token_type": "bearer"}
+
+
 @router.get("/me")
 async def get_me(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     dept = None
@@ -199,6 +224,21 @@ async def upload_avatar(file: UploadFile = File(...), current_user: User = Depen
     return {"message": "Аватар обновлён", "avatar_url": url}
 
 
+@router.delete("/me/avatar")
+async def delete_avatar(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    # Delete the file if it exists
+    if current_user.avatar_url and current_user.avatar_url.startswith("/uploads/"):
+        file_path = os.path.join(settings.UPLOAD_DIR, current_user.avatar_url.replace("/uploads/", ""))
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass  # Ignore file deletion errors
+    current_user.avatar_url = None
+    db.add(current_user)
+    return {"message": "Аватар удалён"}
+
+
 @router.put("/me/avatar-visibility")
 async def update_avatar_visibility(data: dict, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     visibility = data.get("visibility", "all")
@@ -225,6 +265,10 @@ async def change_password(data: dict, current_user: User = Depends(get_current_u
     current_user.password_changed_at = datetime.utcnow()
     current_user.password_expires_at = datetime.utcnow() + timedelta(days=90)
     db.add(current_user)
+    await audit(
+        "password_change", actor_id=str(current_user.id), actor_email=current_user.email,
+        object_type="user", object_id=str(current_user.id),
+    )
     return {"message": "Пароль успешно изменён"}
 
 
@@ -266,19 +310,114 @@ async def search_users(q: str = "", db: AsyncSession = Depends(get_db), current_
     result = await db.execute(query)
     users = result.scalars().all()
     from app.routers.websocket import manager as ws_manager
-    return [{
+    
+    # Check if current user has chat with target user for "contacts" visibility
+    async def has_chat_with(target_user_id):
+        chat_result = await db.execute(
+            select(ChatMember).where(
+                and_(
+                    ChatMember.user_id == current_user.id,
+                    ChatMember.chat_id.in_(
+                        select(ChatMember.chat_id).where(ChatMember.user_id == target_user_id)
+                    )
+                )
+            )
+        )
+        return chat_result.scalar_one_or_none() is not None
+    
+    async def get_avatar_url(user):
+        if not user.avatar_url:
+            return None
+        visibility = user.avatar_visibility or "all"
+        if visibility == "all":
+            return user.avatar_url
+        elif visibility == "contacts":
+            return user.avatar_url if await has_chat_with(user.id) else None
+        elif visibility == "selected":
+            if not user.avatar_visibility_list:
+                return None
+            allowed_ids = json.loads(user.avatar_visibility_list)
+            return user.avatar_url if str(current_user.id) in allowed_ids else None
+        elif visibility == "except":
+            if not user.avatar_visibility_list:
+                return user.avatar_url
+            excluded_ids = json.loads(user.avatar_visibility_list)
+            return user.avatar_url if str(current_user.id) not in excluded_ids else None
+        return user.avatar_url
+    
+    users_data = []
+    for u in users:
+        users_data.append({
+            "id": str(u.id),
+            "email": u.email,
+            "first_name": u.first_name,
+            "last_name": u.last_name,
+            "patronymic": u.patronymic,
+            "avatar_url": await get_avatar_url(u),
+            "position": u.position,
+            "role": u.role,
+            "department_id": str(u.department_id) if u.department_id else None,
+            "status": "online" if ws_manager.is_online(str(u.id)) else (u.status or "offline"),
+            "last_seen": u.last_seen.isoformat() if u.last_seen else None,
+        })
+    
+    return users_data
+
+
+@router.get("/users/{user_id}")
+async def get_user(user_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    import uuid as uuid_mod
+    try:
+        uid = uuid_mod.UUID(user_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Некорректный user_id")
+    res = await db.execute(select(User).where(User.id == uid))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    # Apply avatar visibility logic
+    avatar_url = u.avatar_url
+    if avatar_url:
+        visibility = u.avatar_visibility or "all"
+        if visibility == "all":
+            avatar_url = u.avatar_url
+        elif visibility == "contacts":
+            # Check if they have a chat
+            chat_result = await db.execute(
+                select(ChatMember).where(
+                    and_(
+                        ChatMember.user_id == current_user.id,
+                        ChatMember.chat_id.in_(
+                            select(ChatMember.chat_id).where(ChatMember.user_id == u.id)
+                        )
+                    )
+                )
+            )
+            avatar_url = u.avatar_url if chat_result.scalar_one_or_none() else None
+        elif visibility == "selected":
+            if u.avatar_visibility_list:
+                allowed_ids = json.loads(u.avatar_visibility_list)
+                avatar_url = u.avatar_url if str(current_user.id) in allowed_ids else None
+            else:
+                avatar_url = None
+        elif visibility == "except":
+            if u.avatar_visibility_list:
+                excluded_ids = json.loads(u.avatar_visibility_list)
+                avatar_url = u.avatar_url if str(current_user.id) not in excluded_ids else None
+            else:
+                avatar_url = u.avatar_url
+    
+    return {
         "id": str(u.id),
         "email": u.email,
         "first_name": u.first_name,
         "last_name": u.last_name,
         "patronymic": u.patronymic,
-        "avatar_url": u.avatar_url,
+        "avatar_url": avatar_url,
         "position": u.position,
         "role": u.role,
-        "department_id": str(u.department_id) if u.department_id else None,
-        "status": "online" if ws_manager.is_online(str(u.id)) else (u.status or "offline"),
-        "last_seen": u.last_seen.isoformat() if u.last_seen else None,
-    } for u in users]
+    }
 
 
 @router.get("/users/{user_id}/presence")

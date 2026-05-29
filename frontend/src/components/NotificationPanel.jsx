@@ -8,7 +8,26 @@ export default function NotificationPanel() {
   const [notifications, setNotifications] = useState([])
   const [unread, setUnread] = useState(0)
   const [filter, setFilter] = useState('all') // all, unread, warning, announcement, info
+  const [pos, setPos] = useState({ top: 0, left: 0 })
   const panelRef = useRef(null)
+  const buttonRef = useRef(null)
+
+  // Высчитываем координаты так, чтобы панель не уходила за края экрана
+  const recalcPosition = () => {
+    const btn = buttonRef.current
+    if (!btn) return
+    const rect = btn.getBoundingClientRect()
+    const panelW = 384  // w-96
+    const margin = 8
+    // По умолчанию открываем справа от кнопки (sidebar слева → панель в основной области)
+    let left = rect.right + margin
+    if (left + panelW > window.innerWidth - margin) {
+      // Не помещается справа — открываем слева
+      left = Math.max(margin, rect.left - panelW - margin)
+    }
+    const top = Math.min(rect.bottom + margin, window.innerHeight - 100)
+    setPos({ top, left })
+  }
 
   const fetchNotifications = async () => {
     try {
@@ -29,11 +48,25 @@ export default function NotificationPanel() {
 
   useEffect(() => {
     const handleClickOutside = (e) => {
-      if (panelRef.current && !panelRef.current.contains(e.target)) setOpen(false)
+      if (
+        panelRef.current && !panelRef.current.contains(e.target) &&
+        buttonRef.current && !buttonRef.current.contains(e.target)
+      ) setOpen(false)
     }
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
+
+  useEffect(() => {
+    if (!open) return
+    recalcPosition()
+    window.addEventListener('resize', recalcPosition)
+    window.addEventListener('scroll', recalcPosition, true)
+    return () => {
+      window.removeEventListener('resize', recalcPosition)
+      window.removeEventListener('scroll', recalcPosition, true)
+    }
+  }, [open])
 
   const markRead = async (id) => {
     try {
@@ -81,14 +114,15 @@ export default function NotificationPanel() {
   const formatTime = (dateStr) => {
     if (!dateStr) return ''
     const d = new Date(dateStr)
+    const adjustedD = new Date(d.getTime() + 3 * 60 * 60 * 1000)
     const now = new Date()
-    const diff = now - d
+    const diff = now - adjustedD
     if (diff < 60000) return 'только что'
     if (diff < 3600000) return `${Math.floor(diff / 60000)} мин назад`
-    if (diff < 86400000) return `сегодня в ${d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}`
+    if (diff < 86400000) return `сегодня в ${adjustedD.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}`
     const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1)
-    if (d.toDateString() === yesterday.toDateString()) return `вчера в ${d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}`
-    return d.toLocaleDateString('ru', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+    if (adjustedD.toDateString() === yesterday.toDateString()) return `вчера в ${adjustedD.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}`
+    return adjustedD.toLocaleDateString('ru', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
   }
 
   const filtered = notifications.filter(n => {
@@ -116,7 +150,10 @@ export default function NotificationPanel() {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-1 w-96 bg-dark-900 border border-dark-700 rounded-2xl shadow-2xl z-50 max-h-[75vh] flex flex-col">
+        <div 
+          className="absolute w-96 bg-dark-900 border border-dark-700 rounded-2xl shadow-2xl z-50 max-h-[75vh] flex flex-col"
+          style={{ top: pos.top, left: pos.left }}
+        >
           {/* Header */}
           <div className="px-4 py-3 border-b border-dark-700">
             <div className="flex items-center justify-between mb-2">

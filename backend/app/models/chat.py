@@ -18,6 +18,7 @@ class Chat(Base):
     owner_id = Column(GUID, ForeignKey("users.id", ondelete="SET NULL"))
     is_news_channel = Column(Boolean, default=False)
     is_archived = Column(Boolean, default=False)
+    is_frozen = Column(Boolean, default=False)  # Frozen by super_admin - no one can post
     show_deleted_label = Column(Boolean, default=True)  # False = hard delete, True = show "deleted"
     max_members = Column(Integer, default=1000)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)

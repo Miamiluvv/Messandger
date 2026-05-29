@@ -10,6 +10,7 @@ import ChangePasswordPage from './pages/ChangePasswordPage'
 import CallModal from './components/CallModal'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
+import ErrorBoundary from './components/ErrorBoundary'
 
 function ProtectedRoute({ children }) {
   const { token } = useAuthStore()
@@ -26,6 +27,7 @@ function AdminRoute({ children }) {
 
 export default function App() {
   return (
+    <ErrorBoundary>
     <BrowserRouter>
       <Toaster position="top-center" toastOptions={{ style: { background: '#1f1f1f', color: '#f5f5f5', border: '1px solid #2a2a2a', fontFamily: '"Century Gothic", Arial, sans-serif' } }} />
       <CallModal />
@@ -40,5 +42,6 @@ export default function App() {
         <Route path="/*" element={<ProtectedRoute><MessengerPage /></ProtectedRoute>} />
       </Routes>
     </BrowserRouter>
+    </ErrorBoundary>
   )
 }

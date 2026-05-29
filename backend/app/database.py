@@ -1,12 +1,46 @@
+import logging
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy import event
 
 from app.config import settings
 
-if "sqlite" in settings.DATABASE_URL:
-    engine = create_async_engine(settings.DATABASE_URL, echo=False)
-else:
-    engine = create_async_engine(settings.DATABASE_URL, echo=False, pool_size=20, max_overflow=10)
+logger = logging.getLogger("db")
+
+
+def _build_engine():
+    """Создаёт async engine с учётом TLS / SQLCipher."""
+    url = settings.DATABASE_URL
+    connect_args = {}
+
+    if "sqlite" in url:
+        # SQLCipher: если задан DB_ENCRYPTION_KEY и доступен драйвер
+        eng = create_async_engine(url, echo=False, connect_args=connect_args)
+        if settings.DB_ENCRYPTION_KEY:
+            # Применяем PRAGMA key на каждом соединении (работает только если используется
+            # sqlcipher-совместимый драйвер; на обычном aiosqlite будет проигнорировано).
+            @event.listens_for(eng.sync_engine, "connect")
+            def _set_sqlite_pragma(dbapi_connection, _):
+                try:
+                    cur = dbapi_connection.cursor()
+                    cur.execute(f"PRAGMA key='{settings.DB_ENCRYPTION_KEY}';")
+                    cur.execute("PRAGMA cipher_compatibility=4;")
+                    cur.close()
+                    logger.info("SQLCipher: ключ применён")
+                except Exception as e:
+                    logger.warning("SQLCipher недоступен (%s) — БД работает без шифрования", e)
+        return eng
+
+    # PostgreSQL/другие — принудительный TLS если включено
+    if settings.DB_REQUIRE_TLS and "postgresql" in url:
+        if "sslmode" not in url and "ssl=" not in url:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}ssl=require"
+        connect_args["ssl"] = True
+    return create_async_engine(url, echo=False, pool_size=20, max_overflow=10, connect_args=connect_args)
+
+
+engine = _build_engine()
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 

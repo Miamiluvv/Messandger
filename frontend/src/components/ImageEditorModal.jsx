@@ -1,8 +1,16 @@
 import { useState, useRef, useEffect } from 'react'
-import { X, RotateCw, RotateCcw, FlipHorizontal, FlipVertical, Crop, Pencil, Type, Undo2, Check, Send, Eraser } from 'lucide-react'
+import {
+  X, RotateCw, RotateCcw, FlipHorizontal, FlipVertical, Crop, Pencil, Type,
+  Undo2, Check, Send, Eraser, Square, Circle, ArrowRight, Sliders, Smile
+} from 'lucide-react'
 
 const COLORS = ['#ff0000', '#ffffff', '#000000', '#00ff00', '#0088ff', '#ffff00', '#ff00ff', '#ff8800']
 const BRUSH_SIZES = [2, 4, 8, 16]
+const STICKERS = ['😀', '😎', '😍', '🔥', '👍', '❤️', '⭐', '🎉', '✅', '⚠️']
+
+const DEFAULT_FILTERS = { brightness: 100, contrast: 100, saturate: 100, blur: 0, grayscale: 0, sepia: 0 }
+const filterCss = (f) =>
+  `brightness(${f.brightness}%) contrast(${f.contrast}%) saturate(${f.saturate}%) blur(${f.blur}px) grayscale(${f.grayscale}%) sepia(${f.sepia}%)`
 
 export default function ImageEditorModal({ imageData, onSave, onClose }) {
   const canvasRef = useRef(null)
@@ -16,9 +24,15 @@ export default function ImageEditorModal({ imageData, onSave, onClose }) {
   const [cropStart, setCropStart] = useState(null)
   const [cropEnd, setCropEnd] = useState(null)
   const [cropping, setCropping] = useState(false)
+  const [shapeStart, setShapeStart] = useState(null)
+  const [shapeEnd, setShapeEnd] = useState(null)
   const [textInput, setTextInput] = useState('')
   const [textPos, setTextPos] = useState(null)
+  const [fontSize, setFontSize] = useState(24)
   const [sending, setSending] = useState(false)
+  const [filters, setFilters] = useState(DEFAULT_FILTERS)
+  const [showFilters, setShowFilters] = useState(false)
+  const [showStickers, setShowStickers] = useState(false)
 
   useEffect(() => {
     const image = new window.Image()
@@ -86,7 +100,6 @@ export default function ImageEditorModal({ imageData, onSave, onClose }) {
     tmpCanvas.height = canvas.height
     tmpCanvas.getContext('2d').putImageData(imgData, 0, 0)
 
-    const isRight = deg === 90
     canvas.width = tmpCanvas.height
     canvas.height = tmpCanvas.width
     const newCtx = canvas.getContext('2d')
@@ -148,6 +161,10 @@ export default function ImageEditorModal({ imageData, onSave, onClose }) {
       const pos = getPos(e)
       setCropStart(pos)
       setCropEnd(pos)
+    } else if (tool === 'rect' || tool === 'circle' || tool === 'arrow') {
+      const pos = getPos(e)
+      setShapeStart(pos)
+      setShapeEnd(pos)
     } else if (tool === 'text') {
       setTextPos(getPos(e))
     }
@@ -163,6 +180,10 @@ export default function ImageEditorModal({ imageData, onSave, onClose }) {
       const pos = getPos(e)
       setCropEnd(pos)
       drawCropOverlay(cropStart, pos)
+    } else if ((tool === 'rect' || tool === 'circle' || tool === 'arrow') && shapeStart) {
+      const pos = getPos(e)
+      setShapeEnd(pos)
+      drawShapePreview(tool, shapeStart, pos)
     }
   }
 
@@ -173,6 +194,72 @@ export default function ImageEditorModal({ imageData, onSave, onClose }) {
       pushHistory()
     }
     if (tool === 'crop' && cropping) setCropping(false)
+    if ((tool === 'rect' || tool === 'circle' || tool === 'arrow') && shapeStart && shapeEnd) {
+      commitShape(tool, shapeStart, shapeEnd)
+      setShapeStart(null); setShapeEnd(null)
+      clearOverlay()
+    }
+  }
+
+  const clearOverlay = () => {
+    const overlay = overlayCanvasRef.current
+    if (overlay) overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height)
+  }
+
+  const drawShapePreview = (kind, a, b) => {
+    const overlay = overlayCanvasRef.current
+    if (!overlay) return
+    const ctx = overlay.getContext('2d')
+    ctx.clearRect(0, 0, overlay.width, overlay.height)
+    ctx.strokeStyle = brushColor
+    ctx.lineWidth = brushSize
+    ctx.setLineDash([5, 4])
+    if (kind === 'rect') {
+      ctx.strokeRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y))
+    } else if (kind === 'circle') {
+      ctx.beginPath()
+      const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2
+      const rx = Math.abs(b.x - a.x) / 2, ry = Math.abs(b.y - a.y) / 2
+      ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2)
+      ctx.stroke()
+    } else if (kind === 'arrow') {
+      drawArrow(ctx, a, b)
+    }
+    ctx.setLineDash([])
+  }
+
+  const drawArrow = (ctx, a, b) => {
+    const dx = b.x - a.x, dy = b.y - a.y
+    const angle = Math.atan2(dy, dx)
+    const headLen = Math.max(12, brushSize * 4)
+    ctx.beginPath()
+    ctx.moveTo(a.x, a.y)
+    ctx.lineTo(b.x, b.y)
+    ctx.lineTo(b.x - headLen * Math.cos(angle - Math.PI / 6), b.y - headLen * Math.sin(angle - Math.PI / 6))
+    ctx.moveTo(b.x, b.y)
+    ctx.lineTo(b.x - headLen * Math.cos(angle + Math.PI / 6), b.y - headLen * Math.sin(angle + Math.PI / 6))
+    ctx.stroke()
+  }
+
+  const commitShape = (kind, a, b) => {
+    const ctx = canvasRef.current.getContext('2d')
+    ctx.strokeStyle = brushColor
+    ctx.fillStyle = brushColor
+    ctx.lineWidth = brushSize
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    if (kind === 'rect') {
+      ctx.strokeRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y))
+    } else if (kind === 'circle') {
+      ctx.beginPath()
+      const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2
+      const rx = Math.abs(b.x - a.x) / 2, ry = Math.abs(b.y - a.y) / 2
+      ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2)
+      ctx.stroke()
+    } else if (kind === 'arrow') {
+      drawArrow(ctx, a, b)
+    }
+    pushHistory()
   }
 
   const drawCropOverlay = (start, end) => {
@@ -190,12 +277,10 @@ export default function ImageEditorModal({ imageData, onSave, onClose }) {
     ctx.lineWidth = 1.5
     ctx.setLineDash([6, 4])
     ctx.strokeRect(rx, ry, rw, rh)
-    // Corner handles
     ctx.setLineDash([])
     const hs = 6
     const corners = [[rx, ry], [rx + rw, ry], [rx, ry + rh], [rx + rw, ry + rh]]
     corners.forEach(([cx, cy]) => { ctx.fillStyle = '#fff'; ctx.fillRect(cx - hs / 2, cy - hs / 2, hs, hs) })
-    // Size label
     if (rw > 40 && rh > 20) {
       ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(rx + rw / 2 - 30, ry + rh / 2 - 10, 60, 20)
       ctx.fillStyle = '#fff'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center'
@@ -220,14 +305,12 @@ export default function ImageEditorModal({ imageData, onSave, onClose }) {
 
   const cancelCrop = () => {
     setCropStart(null); setCropEnd(null)
-    const overlay = overlayCanvasRef.current
-    if (overlay) overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height)
+    clearOverlay()
   }
 
   const addText = () => {
     if (!textPos || !textInput.trim()) return
     const ctx = canvasRef.current.getContext('2d')
-    const fontSize = Math.max(16, brushSize * 5)
     ctx.font = `bold ${fontSize}px system-ui, -apple-system, sans-serif`
     ctx.fillStyle = brushColor
     ctx.shadowColor = 'rgba(0,0,0,0.4)'; ctx.shadowBlur = 3; ctx.shadowOffsetX = 1; ctx.shadowOffsetY = 1
@@ -237,8 +320,34 @@ export default function ImageEditorModal({ imageData, onSave, onClose }) {
     pushHistory()
   }
 
+  const addSticker = (emoji) => {
+    const ctx = canvasRef.current.getContext('2d')
+    const size = 64
+    const x = canvasRef.current.width / 2 - size / 2
+    const y = canvasRef.current.height / 2
+    ctx.font = `${size}px sans-serif`
+    ctx.textAlign = 'left'
+    ctx.fillText(emoji, x, y)
+    pushHistory()
+  }
+
+  // Применить фильтры (запекаем CSS-фильтр в пиксели)
+  const bakeFilters = () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const tmp = document.createElement('canvas')
+    tmp.width = canvas.width; tmp.height = canvas.height
+    const tctx = tmp.getContext('2d')
+    tctx.filter = filterCss(filters)
+    tctx.drawImage(canvas, 0, 0)
+    const ctx = canvas.getContext('2d')
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    ctx.drawImage(tmp, 0, 0)
+  }
+
   const handleSendEdited = () => {
     setSending(true)
+    bakeFilters()
     canvasRef.current?.toBlob((blob) => { if (blob) onSave(blob); setSending(false) }, 'image/png')
   }
 
@@ -248,8 +357,14 @@ export default function ImageEditorModal({ imageData, onSave, onClose }) {
   }
 
   const toolBtn = (id, icon, title) => (
-    <button onClick={() => { if (tool === 'crop') cancelCrop(); setTool(tool === id ? 'none' : id) }} className={`p-2 rounded-lg transition-colors ${tool === id ? 'bg-primary-600 text-white shadow-lg' : 'hover:bg-dark-700 text-dark-400 hover:text-white'}`} title={title}>{icon}</button>
+    <button
+      onClick={() => { if (tool === 'crop') cancelCrop(); setTool(tool === id ? 'none' : id) }}
+      className={`p-2 rounded-lg transition-colors ${tool === id ? 'bg-primary-600 text-white shadow-lg' : 'hover:bg-dark-700 text-dark-400 hover:text-white'}`}
+      title={title}
+    >{icon}</button>
   )
+
+  const resetFilters = () => setFilters(DEFAULT_FILTERS)
 
   return (
     <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-3" onClick={onClose}>
@@ -268,34 +383,50 @@ export default function ImageEditorModal({ imageData, onSave, onClose }) {
 
         {/* Toolbar */}
         <div className="flex items-center gap-1 px-5 py-2 border-b border-dark-700 bg-dark-900/80 flex-wrap">
-          {/* Transform */}
           <div className="flex items-center gap-0.5 bg-dark-800 rounded-lg p-0.5">
             <button onClick={() => rotateCanvas(-90)} className="p-1.5 rounded hover:bg-dark-700 text-dark-400 hover:text-white" title="Повернуть влево"><RotateCcw size={15} /></button>
             <button onClick={() => rotateCanvas(90)} className="p-1.5 rounded hover:bg-dark-700 text-dark-400 hover:text-white" title="Повернуть вправо"><RotateCw size={15} /></button>
-            <button onClick={() => flipCanvas(true)} className="p-1.5 rounded hover:bg-dark-700 text-dark-400 hover:text-white" title="Отразить"><FlipHorizontal size={15} /></button>
+            <button onClick={() => flipCanvas(true)} className="p-1.5 rounded hover:bg-dark-700 text-dark-400 hover:text-white" title="Отразить горизонтально"><FlipHorizontal size={15} /></button>
             <button onClick={() => flipCanvas(false)} className="p-1.5 rounded hover:bg-dark-700 text-dark-400 hover:text-white" title="Отразить вертикально"><FlipVertical size={15} /></button>
           </div>
           <div className="w-px h-6 bg-dark-700 mx-1" />
 
-          {/* Tools */}
           <div className="flex items-center gap-0.5 bg-dark-800 rounded-lg p-0.5">
             {toolBtn('draw', <Pencil size={15} />, 'Рисовать')}
             {toolBtn('eraser', <Eraser size={15} />, 'Ластик')}
             {toolBtn('crop', <Crop size={15} />, 'Обрезать')}
             {toolBtn('text', <Type size={15} />, 'Текст')}
+            {toolBtn('rect', <Square size={15} />, 'Прямоугольник')}
+            {toolBtn('circle', <Circle size={15} />, 'Круг')}
+            {toolBtn('arrow', <ArrowRight size={15} />, 'Стрелка')}
           </div>
 
-          {/* Drawing options */}
-          {(tool === 'draw' || tool === 'text' || tool === 'eraser') && (
+          <div className="w-px h-6 bg-dark-700 mx-1" />
+
+          <button
+            onClick={() => { setShowFilters(s => !s); setShowStickers(false) }}
+            className={`p-2 rounded-lg transition-colors ${showFilters ? 'bg-primary-600 text-white' : 'hover:bg-dark-700 text-dark-400 hover:text-white'}`}
+            title="Фильтры"
+          ><Sliders size={15} /></button>
+          <button
+            onClick={() => { setShowStickers(s => !s); setShowFilters(false) }}
+            className={`p-2 rounded-lg transition-colors ${showStickers ? 'bg-primary-600 text-white' : 'hover:bg-dark-700 text-dark-400 hover:text-white'}`}
+            title="Стикеры"
+          ><Smile size={15} /></button>
+
+          {/* Цвета / размер кисти */}
+          {(tool === 'draw' || tool === 'text' || tool === 'eraser' || tool === 'rect' || tool === 'circle' || tool === 'arrow') && (
             <>
               <div className="w-px h-6 bg-dark-700 mx-1" />
-              <div className="flex items-center gap-1">
-                {tool !== 'eraser' && COLORS.map(c => (
-                  <button key={c} onClick={() => setBrushColor(c)}
-                    className={`w-5 h-5 rounded-full border-2 transition-transform ${brushColor === c ? 'border-white scale-125' : 'border-transparent hover:border-dark-400'}`}
-                    style={{ backgroundColor: c }} />
-                ))}
-              </div>
+              {tool !== 'eraser' && (
+                <div className="flex items-center gap-1">
+                  {COLORS.map(c => (
+                    <button key={c} onClick={() => setBrushColor(c)}
+                      className={`w-5 h-5 rounded-full border-2 transition-transform ${brushColor === c ? 'border-white scale-125' : 'border-transparent hover:border-dark-400'}`}
+                      style={{ backgroundColor: c }} />
+                  ))}
+                </div>
+              )}
               <div className="w-px h-6 bg-dark-700 mx-1" />
               <div className="flex items-center gap-0.5 bg-dark-800 rounded-lg p-0.5">
                 {BRUSH_SIZES.map(s => (
@@ -305,10 +436,21 @@ export default function ImageEditorModal({ imageData, onSave, onClose }) {
                   </button>
                 ))}
               </div>
+              {tool === 'text' && (
+                <>
+                  <div className="w-px h-6 bg-dark-700 mx-1" />
+                  <input
+                    type="range" min="12" max="80" value={fontSize}
+                    onChange={(e) => setFontSize(parseInt(e.target.value))}
+                    className="w-24"
+                    title={`Размер шрифта: ${fontSize}px`}
+                  />
+                  <span className="text-xs text-dark-400 w-9 text-right">{fontSize}px</span>
+                </>
+              )}
             </>
           )}
 
-          {/* Crop controls */}
           {tool === 'crop' && cropStart && cropEnd && (
             <>
               <div className="w-px h-6 bg-dark-700 mx-1" />
@@ -317,6 +459,44 @@ export default function ImageEditorModal({ imageData, onSave, onClose }) {
             </>
           )}
         </div>
+
+        {/* Filters panel */}
+        {showFilters && (
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3 px-5 py-3 border-b border-dark-700 bg-dark-800/40">
+            {[
+              { k: 'brightness', label: 'Яркость', min: 0, max: 200, def: 100, suffix: '%' },
+              { k: 'contrast', label: 'Контраст', min: 0, max: 200, def: 100, suffix: '%' },
+              { k: 'saturate', label: 'Насыщенность', min: 0, max: 200, def: 100, suffix: '%' },
+              { k: 'blur', label: 'Размытие', min: 0, max: 10, def: 0, suffix: 'px' },
+              { k: 'grayscale', label: 'Ч/Б', min: 0, max: 100, def: 0, suffix: '%' },
+              { k: 'sepia', label: 'Сепия', min: 0, max: 100, def: 0, suffix: '%' },
+            ].map(({ k, label, min, max, def, suffix }) => (
+              <div key={k} className="flex items-center gap-2">
+                <label className="text-xs text-dark-300 w-28">{label}</label>
+                <input
+                  type="range" min={min} max={max} value={filters[k]}
+                  onChange={(e) => setFilters({ ...filters, [k]: parseFloat(e.target.value) })}
+                  className="flex-1"
+                />
+                <span className="text-xs text-dark-400 w-12 text-right">{filters[k]}{suffix}</span>
+              </div>
+            ))}
+            <div className="col-span-2 md:col-span-3 flex justify-end">
+              <button onClick={resetFilters} className="px-3 py-1 bg-dark-700 hover:bg-dark-600 text-dark-200 text-xs rounded-lg">Сбросить фильтры</button>
+            </div>
+          </div>
+        )}
+
+        {/* Stickers panel */}
+        {showStickers && (
+          <div className="flex items-center gap-2 px-5 py-3 border-b border-dark-700 bg-dark-800/40 flex-wrap">
+            <span className="text-xs text-dark-400 mr-1">Стикеры:</span>
+            {STICKERS.map(s => (
+              <button key={s} onClick={() => addSticker(s)}
+                className="text-2xl w-10 h-10 rounded-lg hover:bg-dark-700 transition-colors">{s}</button>
+            ))}
+          </div>
+        )}
 
         {/* Text input bar */}
         {tool === 'text' && textPos && (
@@ -330,7 +510,7 @@ export default function ImageEditorModal({ imageData, onSave, onClose }) {
           </div>
         )}
 
-        {/* Hint */}
+        {/* Hints */}
         {tool === 'crop' && !cropStart && (
           <div className="px-5 py-1.5 bg-dark-800/60 border-b border-dark-700">
             <p className="text-xs text-dark-400">Выделите область для обрезки</p>
@@ -338,7 +518,12 @@ export default function ImageEditorModal({ imageData, onSave, onClose }) {
         )}
         {tool === 'text' && !textPos && (
           <div className="px-5 py-1.5 bg-dark-800/60 border-b border-dark-700">
-            <p className="text-xs text-dark-400">Кликните на изображение чтобы разместить текст</p>
+            <p className="text-xs text-dark-400">Кликните на изображение, чтобы разместить текст</p>
+          </div>
+        )}
+        {(tool === 'rect' || tool === 'circle' || tool === 'arrow') && (
+          <div className="px-5 py-1.5 bg-dark-800/60 border-b border-dark-700">
+            <p className="text-xs text-dark-400">Удерживайте и тяните, чтобы нарисовать {tool === 'rect' ? 'прямоугольник' : tool === 'circle' ? 'круг' : 'стрелку'}</p>
           </div>
         )}
 
@@ -347,7 +532,14 @@ export default function ImageEditorModal({ imageData, onSave, onClose }) {
           <div className="relative inline-block">
             <canvas ref={canvasRef}
               className="rounded-lg shadow-xl"
-              style={{ maxWidth: '100%', maxHeight: '62vh', cursor: tool === 'draw' || tool === 'eraser' ? 'crosshair' : tool === 'crop' ? 'crosshair' : tool === 'text' ? 'text' : 'default' }}
+              style={{
+                maxWidth: '100%',
+                maxHeight: '62vh',
+                cursor: tool === 'draw' || tool === 'eraser' || tool === 'crop' || tool === 'rect' || tool === 'circle' || tool === 'arrow'
+                  ? 'crosshair'
+                  : tool === 'text' ? 'text' : 'default',
+                filter: filterCss(filters),
+              }}
               onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} />
             <canvas ref={overlayCanvasRef}
               className="absolute inset-0 rounded-lg pointer-events-none"

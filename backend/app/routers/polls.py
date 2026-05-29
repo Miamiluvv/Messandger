@@ -1,11 +1,13 @@
 from datetime import datetime
+import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, and_
 
 from app.database import get_db
 from app.models.user import User
+from app.models.chat import ChatMember
 from app.models.message import Message, Poll, PollOption, PollVote
 from app.services.auth import get_current_user
 
