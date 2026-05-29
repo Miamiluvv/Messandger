@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react'
-import { Reply, Pencil, Trash2, MoreHorizontal, Smile, Play, Pause, FileText, Download, Mic, Check, CheckCheck, Clock, Forward, Copy, Lock } from 'lucide-react'
+import { Reply, Pencil, Trash2, MoreHorizontal, Smile, Play, Pause, FileText, Download, Mic, Check, CheckCheck, Clock, Forward, Copy, Lock, Music } from 'lucide-react'
 import api from '../api/axios'
 import PollMessage from './PollMessage'
 import ForwardMessageModal from './ForwardMessageModal'
@@ -28,7 +28,7 @@ export default function MessageBubble({ msg, isMine, onReply, onEdit, onDelete, 
     )
   }
 
-  const time = new Date(msg.created_at).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })
+  const time = new Date(new Date(msg.created_at).getTime() + 3 * 60 * 60 * 1000).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })
 
   const handleReaction = async (emoji) => {
     try {
@@ -103,13 +103,37 @@ export default function MessageBubble({ msg, isMine, onReply, onEdit, onDelete, 
                     <img
                       src={a.file_url}
                       alt={a.file_name}
-                      className="rounded-lg max-h-64 object-cover cursor-pointer hover:opacity-90"
+                      className="rounded-lg w-full max-h-80 object-cover cursor-pointer hover:opacity-90"
                       onClick={() => showLightbox(a.file_url, a.file_name, allowDownload)}
                     />
                   ) : a.file_type?.startsWith('video') ? (
                     <video src={a.file_url} controls controlsList={allowDownload ? '' : 'nodownload'} className="rounded-lg max-h-48 w-full" />
                   ) : a.file_type?.startsWith('audio') ? (
-                    <audio src={a.file_url} controls controlsList={allowDownload ? '' : 'nodownload'} className="w-full max-w-xs" />
+                    <div className="flex items-center gap-3 bg-dark-800 rounded-xl p-3 min-w-[240px] max-w-[320px]">
+                      <button onClick={() => {
+                        const audio = audioRef.current
+                        if (!audio) return
+                        if (playing) { audio.pause() } else { audio.play() }
+                        setPlaying(!playing)
+                      }} className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 transition-all ${playing ? 'bg-red-500 hover:bg-red-600 shadow-lg shadow-red-500/20' : isMine ? 'bg-white/20 hover:bg-white/30' : 'bg-primary-600 hover:bg-primary-700 shadow-lg shadow-primary-500/20'}`} title={playing ? 'Пауза' : 'Воспроизвести'}>
+                        {playing ? <Pause size={16} className="text-white" /> : <Play size={16} className="text-white ml-0.5" />}
+                      </button>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs text-white truncate mb-1">{a.file_name}</p>
+                        <div className="h-1 bg-dark-700 rounded-full overflow-hidden">
+                          <div className="h-full bg-primary-500 transition-all duration-100" style={{ width: voiceProgress > 0 ? `${voiceProgress * 100}%` : '0%' }} />
+                        </div>
+                      </div>
+                      <Music size={14} className={isMine ? 'text-primary-200' : 'text-dark-500'} flex-shrink-0 />
+                      <audio ref={audioRef} src={a.file_url} onTimeUpdate={(e) => {
+                        const audio = e.target
+                        if (audio.duration) {
+                          setVoiceProgress(audio.currentTime / audio.duration)
+                          setVoiceCurrentTime(audio.currentTime)
+                          setVoiceDuration(audio.duration)
+                        }
+                      }} onEnded={() => { setPlaying(false); setVoiceProgress(0) }} className="hidden" />
+                    </div>
                   ) : (
                     <FileAttachment a={a} allowDownload={allowDownload} />
                   )}
@@ -218,7 +242,7 @@ export default function MessageBubble({ msg, isMine, onReply, onEdit, onDelete, 
                 <Copy size={12} /> Копировать
               </button>
             )}
-            {isMine && msg.message_type === 'text' && (
+            {isMine && (msg.message_type === 'text' || msg.message_type === 'poll') && (
               <button onClick={() => { onEdit(msg); setShowMenu(false) }} className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-dark-300 hover:bg-dark-700 hover:text-white">
                 <Pencil size={12} /> Редактировать
               </button>

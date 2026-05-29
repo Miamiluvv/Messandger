@@ -31,7 +31,7 @@ class Message(Base):
     attachments = relationship("MessageAttachment", back_populates="message", lazy="selectin", cascade="all, delete-orphan")
     reactions = relationship("Reaction", back_populates="message", lazy="selectin", cascade="all, delete-orphan")
     reply_to = relationship("Message", foreign_keys=[reply_to_id], remote_side="Message.id", lazy="selectin")
-    poll = relationship("Poll", back_populates="message", uselist=False, lazy="selectin")
+    poll = relationship("Poll", back_populates="message", uselist=False, lazy="selectin", cascade="all, delete-orphan")
 
 
 class MessageAttachment(Base):

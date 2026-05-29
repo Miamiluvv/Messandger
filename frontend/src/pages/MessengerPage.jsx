@@ -16,7 +16,9 @@ export default function MessengerPage() {
   useEffect(() => {
     fetchUser()
     fetchChats()
-    if (token) connect(token)
+    if (token) {
+      connect(token)
+    }
   }, [])
 
   return (

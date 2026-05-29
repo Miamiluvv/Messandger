@@ -2,9 +2,10 @@ import { create } from 'zustand'
 
 export const useCallStore = create((set, get) => ({
   // Call state
-  activeCall: null, // { id, type: 'audio'|'video', participants: [], isOutgoing: bool }
+  activeCall: null, // { id, type: 'audio'|'video', participants: [{user_id, first_name, last_name, avatar_url}], isOutgoing: bool, isBroadcast: bool }
   incomingCall: null, // { call_id, call_type, from_user, from_name, from_avatar }
   callStatus: 'idle', // idle, ringing, connecting, active, ended
+  broadcastInfo: null, // { call_id, call_type, from_user, from_name, from_avatar }
 
   // Media state
   isMuted: false,
@@ -20,6 +21,7 @@ export const useCallStore = create((set, get) => ({
   setActiveCall: (call) => set({ activeCall: call }),
   setIncomingCall: (call) => set({ incomingCall: call }),
   setCallStatus: (status) => set({ callStatus: status }),
+  setBroadcastInfo: (info) => set({ broadcastInfo: info }),
 
   toggleMute: () => {
     const { localStream, isMuted } = get()
@@ -63,6 +65,7 @@ export const useCallStore = create((set, get) => ({
       activeCall: null,
       incomingCall: null,
       callStatus: 'idle',
+      broadcastInfo: null,
       isMuted: false,
       isCameraOff: false,
       isScreenSharing: false,

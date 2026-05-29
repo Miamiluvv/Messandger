@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Users, FileText, UserPlus, Shield, ChevronLeft, Bell, Send, AlertTriangle, Building2 } from 'lucide-react'
+import { Users, FileText, UserPlus, Shield, ChevronLeft, Bell, Send, AlertTriangle, Building2, MessageSquare, Snowflake, Trash2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import api from '../api/axios'
 import toast from 'react-hot-toast'
@@ -10,6 +10,7 @@ export default function AdminPage() {
   const [requests, setRequests] = useState([])
   const [users, setUsers] = useState([])
   const [profileRequests, setProfileRequests] = useState([])
+  const [chats, setChats] = useState([])
   const [searchQuery, setSearchQuery] = useState('')
   const [departments, setDepartments] = useState([])
 
@@ -37,6 +38,9 @@ export default function AdminPage() {
     } else if (tab === 'profile') {
       const r = await api.get('/admin/profile-requests')
       setProfileRequests(r.data)
+    } else if (tab === 'chats') {
+      const r = await api.get('/chats/all')
+      setChats(r.data)
     } else if (tab === 'notifications') {
       try {
         const r = await api.get('/notifications/sent')
@@ -102,6 +106,38 @@ export default function AdminPage() {
     loadData()
   }
 
+  const unfreezeUser = async (id) => {
+    const ok = await useConfirmStore.getState().ask({ title: 'Разморозить учётную запись?', message: 'Вход будет разрешён.', confirmText: 'Разморозить' })
+    if (!ok) return
+    await api.post(`/admin/users/${id}/unfreeze`)
+    toast.success('Разморожен')
+    loadData()
+  }
+
+  const freezeChat = async (id) => {
+    const ok = await useConfirmStore.getState().ask({ title: 'Заморозить чат?', message: 'Отправка сообщений будет запрещена.', confirmText: 'Заморозить' })
+    if (!ok) return
+    try {
+      const res = await api.post(`/chats/${id}/freeze`)
+      toast.success(res.data.message)
+      loadData()
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Ошибка')
+    }
+  }
+
+  const deleteChat = async (id, name) => {
+    const ok = await useConfirmStore.getState().ask({ title: `Удалить чат «${name}»?`, message: 'Это действие нельзя отменить.', confirmText: 'Удалить' })
+    if (!ok) return
+    try {
+      await api.delete(`/chats/${id}`)
+      toast.success('Чат удалён')
+      loadData()
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Ошибка')
+    }
+  }
+
   const resetPassword = async (id) => {
     const ok = await useConfirmStore.getState().ask({ title: 'Сбросить пароль?', message: 'Пользователю будет установлен новый пароль.', confirmText: 'Сбросить' })
     if (!ok) return
@@ -129,6 +165,9 @@ export default function AdminPage() {
           </button>
           <button onClick={() => setTab('users')} className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${tab === 'users' ? 'bg-primary-600 text-white' : 'text-dark-400 hover:text-white hover:bg-dark-800'}`}>
             <Users size={16} /> Пользователи
+          </button>
+          <button onClick={() => setTab('chats')} className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${tab === 'chats' ? 'bg-primary-600 text-white' : 'text-dark-400 hover:text-white hover:bg-dark-800'}`}>
+            <MessageSquare size={16} /> Чаты и каналы
           </button>
           <button onClick={() => setTab('profile')} className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${tab === 'profile' ? 'bg-primary-600 text-white' : 'text-dark-400 hover:text-white hover:bg-dark-800'}`}>
             <UserPlus size={16} /> Запросы на смену ФИО
@@ -181,7 +220,53 @@ export default function AdminPage() {
                     {!u.is_blocked && <button onClick={() => blockUser(u.id)} className="px-2 py-1 bg-red-600/20 text-red-400 text-xs rounded hover:bg-red-600/40">Блок</button>}
                     {u.is_blocked && <button onClick={() => unblockUser(u.id)} className="px-2 py-1 bg-green-600/20 text-green-400 text-xs rounded hover:bg-green-600/40">Разблок</button>}
                     {!u.is_frozen && <button onClick={() => freezeUser(u.id)} className="px-2 py-1 bg-blue-600/20 text-blue-400 text-xs rounded hover:bg-blue-600/40">Заморозить</button>}
+                    {u.is_frozen && <button onClick={() => unfreezeUser(u.id)} className="px-2 py-1 bg-green-600/20 text-green-400 text-xs rounded hover:bg-green-600/40">Разморозить</button>}
                     <button onClick={() => resetPassword(u.id)} className="px-2 py-1 bg-orange-600/20 text-orange-400 text-xs rounded hover:bg-orange-600/40">Сброс пароля</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {tab === 'chats' && (
+          <div>
+            <h3 className="text-xl font-bold text-white mb-4">Управление чатами и каналами ({chats.length})</h3>
+            <div className="space-y-2">
+              {chats.map((chat) => (
+                <div key={chat.id} className="bg-dark-900 border border-dark-700 rounded-xl p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <div>
+                      <p className="text-white text-sm font-medium flex items-center gap-2">
+                        {chat.chat_type === 'group' && <MessageSquare size={14} className="text-blue-400" />}
+                        {chat.chat_type === 'channel' && <MessageSquare size={14} className="text-green-400" />}
+                        {chat.is_news_channel && <MessageSquare size={14} className="text-yellow-400" />}
+                        {chat.name || 'Без названия'}
+                      </p>
+                      <p className="text-dark-400 text-xs">
+                        {chat.chat_type === 'group' ? 'Группа' : chat.chat_type === 'channel' ? 'Канал' : 'Чат'} · {chat.members_count} участников
+                        {chat.is_frozen && ' · ❄️ Заморожен'}
+                      </p>
+                    </div>
+                    <div className="flex gap-1">
+                      <button onClick={() => freezeChat(chat.id)} className={`px-2 py-1 text-xs rounded ${chat.is_frozen ? 'bg-green-600/20 text-green-400 hover:bg-green-600/40' : 'bg-blue-600/20 text-blue-400 hover:bg-blue-600/40'}`}>
+                        <Snowflake size={12} />
+                      </button>
+                      {chat.chat_type !== 'private' && !(chat.is_news_channel && chat.name === 'Новости ДГИ') && (
+                        <button onClick={() => deleteChat(chat.id, chat.name)} className="px-2 py-1 bg-red-600/20 text-red-400 text-xs rounded hover:bg-red-600/40">
+                          <Trash2 size={12} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {chat.description && <p className="text-dark-500 text-xs mb-2">{chat.description}</p>}
+                  <div className="flex flex-wrap gap-1">
+                    {chat.members?.slice(0, 5).map((m) => (
+                      <span key={m.user_id} className="text-[10px] bg-dark-800 text-dark-300 px-2 py-0.5 rounded">
+                        {m.first_name} {m.last_name} ({m.role})
+                      </span>
+                    ))}
+                    {chat.members?.length > 5 && <span className="text-[10px] text-dark-500">+{chat.members.length - 5} ещё</span>}
                   </div>
                 </div>
               ))}
@@ -276,7 +361,7 @@ export default function AdminPage() {
                     <div className="flex items-center gap-2 mb-1">
                       {n.type === 'warning' ? <AlertTriangle size={14} className="text-orange-400" /> : <Bell size={14} className="text-primary-400" />}
                       <span className="text-sm font-medium text-white">{n.title}</span>
-                      <span className="text-[10px] text-dark-500 ml-auto">{new Date(n.created_at).toLocaleString('ru')}</span>
+                      <span className="text-[10px] text-dark-500 ml-auto">{new Date(new Date(n.created_at).getTime() + 3 * 60 * 60 * 1000).toLocaleString('ru')}</span>
                     </div>
                     {n.body && <p className="text-xs text-dark-400 ml-6">{n.body}</p>}
                   </div>

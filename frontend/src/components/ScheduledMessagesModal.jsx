@@ -36,7 +36,8 @@ export default function ScheduledMessagesModal({ chatId, onClose }) {
   const fmt = (iso) => {
     if (!iso) return ''
     const d = new Date(iso)
-    return d.toLocaleString('ru', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    const adjustedD = new Date(d.getTime() + 3 * 60 * 60 * 1000)
+    return adjustedD.toLocaleString('ru', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
   }
 
   return (

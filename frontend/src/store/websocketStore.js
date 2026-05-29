@@ -50,6 +50,11 @@ export const useWebSocketStore = create((set, get) => ({
         toast(`${icon} ${data.title}${data.body ? '\n' + data.body : ''}`, { duration: 6000 })
       } else if (data.type === 'call_invite') {
         useCallStore.getState().setIncomingCall(data)
+      } else if (data.type === 'broadcast_started') {
+        // Показать уведомление о начале трансляции
+        toast(`📡 Трансляция начана: ${data.from_name}`, { duration: 5000 })
+        // Можно добавить кнопку для присоединения к трансляции
+        useCallStore.getState().setBroadcastInfo(data)
       } else if (data.type === 'call_accept') {
         window.__callHandlers?.handleCallAccepted(data)
       } else if (data.type === 'call_reject') {

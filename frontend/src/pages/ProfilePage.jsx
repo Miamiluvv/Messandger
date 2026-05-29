@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
-import { ChevronLeft, Camera, Lock, User, Mail, Building2, Briefcase, AlertTriangle, LogOut, Eye, EyeOff, Users, Search, X, Check } from 'lucide-react'
+import { ChevronLeft, Camera, Lock, User, Mail, Building2, Briefcase, AlertTriangle, LogOut, Eye, EyeOff, Users, Search, X, Check, Trash2 } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/authStore'
 import api from '../api/axios'
 import toast from 'react-hot-toast'
 import Avatar from '../components/Avatar'
+import { confirmDelete } from '../store/confirmStore'
 
 const VISIBILITY_OPTIONS = [
   { key: 'all', label: 'Все', desc: 'Аватарка видна всем пользователям' },
@@ -80,6 +81,18 @@ export default function ProfilePage() {
     e.target.value = ''
   }
 
+  const handleDeleteAvatar = async () => {
+    if (!user?.avatar_url) return
+    if (!(await confirmDelete('Удалить аватар?'))) return
+    try {
+      await api.delete('/auth/me/avatar')
+      toast.success('Аватар удалён')
+      fetchUser()
+    } catch (err) {
+      toast.error('Ошибка удаления аватара')
+    }
+  }
+
   const saveAvatarVisibility = async (vis, list) => {
     try {
       await api.put('/auth/me/avatar-visibility', { visibility: vis, user_ids: list })
@@ -138,6 +151,11 @@ export default function ProfilePage() {
                 <button onClick={() => fileRef.current?.click()} className="absolute -bottom-1 -right-1 w-8 h-8 bg-primary-600 hover:bg-primary-700 rounded-full flex items-center justify-center shadow-lg">
                   <Camera size={14} className="text-white" />
                 </button>
+                {user?.avatar_url && (
+                  <button onClick={handleDeleteAvatar} className="absolute -bottom-1 -left-1 w-8 h-8 bg-red-600 hover:bg-red-700 rounded-full flex items-center justify-center shadow-lg">
+                    <Trash2 size={14} className="text-white" />
+                  </button>
+                )}
                 <input type="file" ref={fileRef} className="hidden" accept="image/*" onChange={handleAvatarUpload} />
               </div>
               <div>

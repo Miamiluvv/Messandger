@@ -1,5 +1,6 @@
 import uuid as uuid_mod
 import os
+import json
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -52,11 +53,31 @@ async def get_chats(db: AsyncSession = Depends(get_db), current_user: User = Dep
             u_result = await db.execute(select(User).where(User.id == m.user_id))
             u = u_result.scalar_one_or_none()
             if u:
+                # Apply avatar visibility logic
+                avatar_url = u.avatar_url
+                if avatar_url:
+                    visibility = u.avatar_visibility or "all"
+                    if visibility == "contacts":
+                        # Always show in chat members (they have chat)
+                        avatar_url = u.avatar_url
+                    elif visibility == "selected":
+                        if u.avatar_visibility_list:
+                            allowed_ids = json.loads(u.avatar_visibility_list)
+                            avatar_url = u.avatar_url if str(current_user.id) in allowed_ids else None
+                        else:
+                            avatar_url = None
+                    elif visibility == "except":
+                        if u.avatar_visibility_list:
+                            excluded_ids = json.loads(u.avatar_visibility_list)
+                            avatar_url = u.avatar_url if str(current_user.id) not in excluded_ids else None
+                        else:
+                            avatar_url = u.avatar_url
+                
                 members_data.append({
                     "user_id": str(u.id),
                     "first_name": u.first_name,
                     "last_name": u.last_name,
-                    "avatar_url": u.avatar_url,
+                    "avatar_url": avatar_url,
                     "status": u.status,
                     "role": m.role,
                 })
@@ -80,11 +101,77 @@ async def get_chats(db: AsyncSession = Depends(get_db), current_user: User = Dep
             "description": chat.description,
             "avatar_url": chat.avatar_url,
             "is_news_channel": chat.is_news_channel,
+            "is_frozen": chat.is_frozen,
             "show_deleted_label": chat.show_deleted_label,
             "members": members_data,
             "last_message": last_message_data,
             "unread_count": unread,
             "is_pinned": my_member.is_pinned if my_member else False,
+        })
+
+    return items
+
+
+@router.get("/all")
+async def get_all_chats(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Get all chats (super_admin only)"""
+    if current_user.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Только суперадмин может видеть все чаты")
+    
+    result = await db.execute(
+        select(Chat).order_by(Chat.updated_at.desc())
+    )
+    chats = result.scalars().all()
+    items = []
+    for chat in chats:
+        # Skip saved chats (personal to each user)
+        if chat.chat_type == "saved":
+            continue
+        
+        members_data = []
+        for m in chat.members:
+            u_result = await db.execute(select(User).where(User.id == m.user_id))
+            u = u_result.scalar_one_or_none()
+            if u:
+                # Apply avatar visibility logic
+                avatar_url = u.avatar_url
+                if avatar_url:
+                    visibility = u.avatar_visibility or "all"
+                    if visibility == "all":
+                        avatar_url = u.avatar_url
+                    elif visibility == "selected":
+                        if u.avatar_visibility_list:
+                            allowed_ids = json.loads(u.avatar_visibility_list)
+                            avatar_url = u.avatar_url if str(current_user.id) in allowed_ids else None
+                        else:
+                            avatar_url = None
+                    elif visibility == "except":
+                        if u.avatar_visibility_list:
+                            excluded_ids = json.loads(u.avatar_visibility_list)
+                            avatar_url = u.avatar_url if str(current_user.id) not in excluded_ids else None
+                        else:
+                            avatar_url = u.avatar_url
+                
+                members_data.append({
+                    "user_id": str(u.id),
+                    "first_name": u.first_name,
+                    "last_name": u.last_name,
+                    "avatar_url": avatar_url,
+                    "role": m.role,
+                })
+
+        items.append({
+            "id": str(chat.id),
+            "chat_type": chat.chat_type,
+            "name": chat.name,
+            "description": chat.description,
+            "avatar_url": chat.avatar_url,
+            "is_news_channel": chat.is_news_channel,
+            "is_frozen": chat.is_frozen,
+            "owner_id": str(chat.owner_id) if chat.owner_id else None,
+            "members_count": len(chat.members),
+            "members": members_data,
+            "created_at": chat.created_at.isoformat() if chat.created_at else None,
         })
 
     return items
@@ -131,7 +218,7 @@ async def create_chat(data: dict, db: AsyncSession = Depends(get_db), current_us
             elif chat_type == "group":
                 u_result = await db.execute(select(User).where(User.id == uid_parsed))
                 u = u_result.scalar_one_or_none()
-                if u and u.role in ("head", "deputy_head"):
+                if u and u.role in ("head", "deputy_head", "super_admin", "admin"):
                     role = "admin"
             db.add(ChatMember(chat_id=chat.id, user_id=uid_parsed, role=role))
 
@@ -181,6 +268,28 @@ async def get_messages(chat_id: str, limit: int = 50, offset: int = 0, db: Async
     for msg in messages:
         sender_result = await db.execute(select(User).where(User.id == msg.sender_id))
         sender = sender_result.scalar_one_or_none()
+        
+        # Apply avatar visibility logic for sender
+        sender_avatar = None
+        if sender and sender.avatar_url:
+            visibility = sender.avatar_visibility or "all"
+            if visibility == "all":
+                sender_avatar = sender.avatar_url
+            elif visibility == "contacts":
+                # In chat context, always show (they have chat)
+                sender_avatar = sender.avatar_url
+            elif visibility == "selected":
+                if sender.avatar_visibility_list:
+                    allowed_ids = json.loads(sender.avatar_visibility_list)
+                    sender_avatar = sender.avatar_url if str(current_user.id) in allowed_ids else None
+                else:
+                    sender_avatar = None
+            elif visibility == "except":
+                if sender.avatar_visibility_list:
+                    excluded_ids = json.loads(sender.avatar_visibility_list)
+                    sender_avatar = sender.avatar_url if str(current_user.id) not in excluded_ids else None
+                else:
+                    sender_avatar = sender.avatar_url
 
         reply_data = None
         if msg.reply_to:
@@ -234,7 +343,7 @@ async def get_messages(chat_id: str, limit: int = 50, offset: int = 0, db: Async
             "chat_id": str(msg.chat_id),
             "sender_id": str(msg.sender_id),
             "sender_name": f"{sender.first_name} {sender.last_name}" if sender else "",
-            "sender_avatar": sender.avatar_url if sender else None,
+            "sender_avatar": sender_avatar,
             "content": msg.content,
             "message_type": msg.message_type,
             "reply_to": reply_data,
@@ -256,6 +365,13 @@ async def get_messages(chat_id: str, limit: int = 50, offset: int = 0, db: Async
 @router.post("/{chat_id}/messages")
 async def send_message(chat_id: str, data: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     cid = uuid_mod.UUID(chat_id)
+    
+    # Check if chat is frozen
+    chat_result = await db.execute(select(Chat).where(Chat.id == cid))
+    chat = chat_result.scalar_one_or_none()
+    if chat and chat.is_frozen:
+        raise HTTPException(status_code=403, detail="Чат заморожен. Отправка сообщений запрещена.")
+    
     member_check = await db.execute(
         select(ChatMember).where(ChatMember.chat_id == cid, ChatMember.user_id == current_user.id)
     )
@@ -278,6 +394,25 @@ async def send_message(chat_id: str, data: dict, db: AsyncSession = Depends(get_
     db.add(message)
     await db.flush()
 
+    # Apply avatar visibility logic for current user
+    avatar_url = current_user.avatar_url
+    if avatar_url:
+        visibility = current_user.avatar_visibility or "all"
+        if visibility == "all":
+            avatar_url = current_user.avatar_url
+        elif visibility == "selected":
+            if current_user.avatar_visibility_list:
+                # For own avatar, always show
+                avatar_url = current_user.avatar_url
+            else:
+                avatar_url = None
+        elif visibility == "except":
+            if current_user.avatar_visibility_list:
+                # For own avatar, always show
+                avatar_url = current_user.avatar_url
+            else:
+                avatar_url = current_user.avatar_url
+
     # Обновить last_read
     member.last_read_message_id = message.id
 
@@ -292,7 +427,7 @@ async def send_message(chat_id: str, data: dict, db: AsyncSession = Depends(get_
         "chat_id": str(message.chat_id),
         "sender_id": str(message.sender_id),
         "sender_name": f"{current_user.first_name} {current_user.last_name}",
-        "sender_avatar": current_user.avatar_url,
+        "sender_avatar": avatar_url,
         "content": message.content,
         "message_type": message.message_type,
         "allow_download": bool(message.allow_download),
@@ -376,6 +511,7 @@ async def upload_file(
     chat_id: str,
     file: UploadFile = File(...),
     allow_download: bool = Form(True),
+    content: str = Form(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -387,19 +523,36 @@ async def upload_file(
     if not member or member.role == "readonly":
         raise HTTPException(status_code=403, detail="Нет прав")
 
-    # Сохранить файл
+    # ---- Валидация: расширение и размер ----
+    ext = os.path.splitext(file.filename or "")[1].lower().lstrip(".")
+    if ext and ext not in settings.allowed_extensions:
+        raise HTTPException(status_code=400, detail=f"Тип файла .{ext} не разрешён")
+
+    # Сохранить файл (потоково, с контролем размера)
     file_id = str(uuid_mod.uuid4())
-    ext = os.path.splitext(file.filename)[1] if file.filename else ""
-    save_name = f"{file_id}{ext}"
+    save_name = f"{file_id}.{ext}" if ext else file_id
     save_path = os.path.join(settings.UPLOAD_DIR, save_name)
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 
-    content = await file.read()
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    total = 0
     with open(save_path, "wb") as f:
-        f.write(content)
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                f.close()
+                try:
+                    os.remove(save_path)
+                except Exception:
+                    pass
+                raise HTTPException(status_code=413, detail=f"Файл превышает {settings.MAX_UPLOAD_MB} МБ")
+            f.write(chunk)
 
     file_url = f"/uploads/{save_name}"
-    file_size = len(content)
+    file_size = total
     file_type = file.content_type or "application/octet-stream"
 
     # Определить тип сообщения
@@ -412,8 +565,8 @@ async def upload_file(
     elif file_type.startswith("audio"):
         msg_type = "voice" if fname.startswith("voice_") else "audio"
 
-    # Контент: для медиа не показываем имя файла
-    display_content = None if msg_type in ("image", "video", "voice", "audio") else fname
+    # Контент: если передан текст - используем его, иначе для медиа не показываем имя файла
+    display_content = content if content and content.strip() else (None if msg_type in ("image", "video", "voice", "audio") else fname)
 
     # Создать сообщение с вложением
     message = Message(
@@ -496,7 +649,7 @@ async def add_members(chat_id: str, data: dict, db: AsyncSession = Depends(get_d
             elif chat_obj.chat_type == "group":
                 u_result = await db.execute(select(User).where(User.id == uid_parsed))
                 u = u_result.scalar_one_or_none()
-                if u and u.role in ("head", "deputy_head"):
+                if u and u.role in ("head", "deputy_head", "super_admin", "admin"):
                     role = "admin"
         db.add(ChatMember(chat_id=cid, user_id=uid_parsed, role=role))
         added.append(uid)
@@ -523,15 +676,100 @@ async def remove_member(chat_id: str, user_id: str, db: AsyncSession = Depends(g
     return {"message": "Участник удалён"}
 
 
+@router.post("/{chat_id}/leave")
+async def leave_chat(chat_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    cid = uuid_mod.UUID(chat_id)
+    
+    # Check if chat exists
+    chat_result = await db.execute(select(Chat).where(Chat.id == cid))
+    chat = chat_result.scalar_one_or_none()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Чат не найден")
+    
+    # Restrict leaving "Новости ДГИ" channel
+    if chat.is_news_channel and chat.name == "Новости ДГИ":
+        raise HTTPException(status_code=403, detail="Нельзя выйти из канала «Новости ДГИ»")
+    
+    # Check if user is a member
+    member_result = await db.execute(
+        select(ChatMember).where(ChatMember.chat_id == cid, ChatMember.user_id == current_user.id)
+    )
+    member = member_result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail="Вы не участник этого чата")
+    
+    # Owner cannot leave (must transfer ownership or delete chat)
+    if member.role == "owner":
+        raise HTTPException(status_code=403, detail="Владелец не может выйти из чата")
+    
+    await db.delete(member)
+    return {"message": "Вы вышли из чата"}
+
+
+@router.delete("/{chat_id}")
+async def delete_chat(chat_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    cid = uuid_mod.UUID(chat_id)
+    
+    # Check if chat exists
+    chat_result = await db.execute(select(Chat).where(Chat.id == cid))
+    chat = chat_result.scalar_one_or_none()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Чат не найден")
+    
+    # Restrict deleting "Новости ДГИ" channel
+    if chat.is_news_channel and chat.name == "Новости ДГИ":
+        raise HTTPException(status_code=403, detail="Нельзя удалить канал «Новости ДГИ»")
+    
+    # Super admin can delete any chat (except private chats and Новости ДГИ)
+    if current_user.role == "super_admin":
+        if chat.chat_type == "private":
+            raise HTTPException(status_code=403, detail="Приватные чаты нельзя удалить")
+    else:
+        # Check if user is owner
+        if chat.owner_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Только владелец может удалить чат")
+        # Private chats cannot be deleted
+        if chat.chat_type == "private":
+            raise HTTPException(status_code=403, detail="Приватные чаты нельзя удалить")
+    
+    await db.delete(chat)
+    return {"message": "Чат удалён"}
+
+
+@router.post("/{chat_id}/freeze")
+async def freeze_chat(chat_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Freeze or unfreeze a chat (super_admin only)"""
+    if current_user.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Только суперадмин может замораживать чаты")
+    
+    cid = uuid_mod.UUID(chat_id)
+    chat_result = await db.execute(select(Chat).where(Chat.id == cid))
+    chat = chat_result.scalar_one_or_none()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Чат не найден")
+    
+    # Cannot freeze private chats or Новости ДГИ
+    if chat.chat_type == "private":
+        raise HTTPException(status_code=403, detail="Приватные чаты нельзя заморозить")
+    if chat.is_news_channel and chat.name == "Новости ДГИ":
+        raise HTTPException(status_code=403, detail="Нельзя заморозить канал «Новости ДГИ»")
+    
+    chat.is_frozen = not chat.is_frozen
+    return {"message": "Чат заморожен" if chat.is_frozen else "Чат разморожен", "is_frozen": chat.is_frozen}
+
+
 @router.put("/{chat_id}/settings")
 async def update_chat_settings(chat_id: str, data: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     cid = uuid_mod.UUID(chat_id)
-    member_check = await db.execute(
-        select(ChatMember).where(ChatMember.chat_id == cid, ChatMember.user_id == current_user.id)
-    )
-    member = member_check.scalar_one_or_none()
-    if not member or member.role not in ("owner", "admin"):
-        raise HTTPException(status_code=403, detail="Нет прав")
+    
+    # Суперадмин может редактировать любой чат
+    if current_user.role != 'super_admin':
+        member_check = await db.execute(
+            select(ChatMember).where(ChatMember.chat_id == cid, ChatMember.user_id == current_user.id)
+        )
+        member = member_check.scalar_one_or_none()
+        if not member or member.role not in ("owner", "admin"):
+            raise HTTPException(status_code=403, detail="Нет прав")
 
     chat_result = await db.execute(select(Chat).where(Chat.id == cid))
     chat = chat_result.scalar_one_or_none()
@@ -546,6 +784,108 @@ async def update_chat_settings(chat_id: str, data: dict, db: AsyncSession = Depe
         chat.show_deleted_label = data["show_deleted_label"]
 
     return {"message": "Настройки обновлены"}
+
+
+@router.post("/{chat_id}/avatar/upload")
+async def upload_chat_avatar(
+    chat_id: str,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        cid = uuid_mod.UUID(chat_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Неверный ID чата")
+    
+    # Проверка прав
+    if current_user.role != 'super_admin':
+        member_check = await db.execute(
+            select(ChatMember).where(ChatMember.chat_id == cid, ChatMember.user_id == current_user.id)
+        )
+        member = member_check.scalar_one_or_none()
+        if not member or member.role not in ("owner", "admin"):
+            raise HTTPException(status_code=403, detail="Нет прав")
+
+    chat_result = await db.execute(select(Chat).where(Chat.id == cid))
+    chat = chat_result.scalar_one_or_none()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Чат не найден")
+
+    # Валидация файла
+    if not file.content_type or not file.content_type.startswith('image/'):
+        raise HTTPException(status_code=400, detail="Только изображения")
+
+    # Сохранить файл
+    file_id = str(uuid_mod.uuid4())
+    ext = os.path.splitext(file.filename or "")[1].lower().lstrip(".") or "png"
+    save_name = f"{file_id}.{ext}"
+    save_path = os.path.join(settings.UPLOAD_DIR, save_name)
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    total = 0
+    with open(save_path, "wb") as f:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                f.close()
+                try:
+                    os.remove(save_path)
+                except Exception:
+                    pass
+                raise HTTPException(status_code=413, detail=f"Файл превышает {settings.MAX_UPLOAD_MB} МБ")
+            f.write(chunk)
+
+    # Удалить старый аватар
+    if chat.avatar_url and chat.avatar_url.startswith("/uploads/"):
+        try:
+            old_path = os.path.join(settings.UPLOAD_DIR, chat.avatar_url.replace("/uploads/", ""))
+            if os.path.exists(old_path):
+                os.remove(old_path)
+        except Exception:
+            pass
+
+    chat.avatar_url = f"/uploads/{save_name}"
+    return {"avatar_url": chat.avatar_url}
+
+
+@router.delete("/{chat_id}/avatar")
+async def delete_chat_avatar(
+    chat_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    cid = uuid_mod.UUID(chat_id)
+    
+    # Проверка прав
+    if current_user.role != 'super_admin':
+        member_check = await db.execute(
+            select(ChatMember).where(ChatMember.chat_id == cid, ChatMember.user_id == current_user.id)
+        )
+        member = member_check.scalar_one_or_none()
+        if not member or member.role not in ("owner", "admin"):
+            raise HTTPException(status_code=403, detail="Нет прав")
+
+    chat_result = await db.execute(select(Chat).where(Chat.id == cid))
+    chat = chat_result.scalar_one_or_none()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Чат не найден")
+
+    # Удалить файл
+    if chat.avatar_url and chat.avatar_url.startswith("/uploads/"):
+        try:
+            old_path = os.path.join(settings.UPLOAD_DIR, chat.avatar_url.replace("/uploads/", ""))
+            if os.path.exists(old_path):
+                os.remove(old_path)
+        except Exception:
+            pass
+
+    chat.avatar_url = None
+    return {"message": "Аватар удален"}
 
 
 @router.post("/{chat_id}/messages/{message_id}/reactions")

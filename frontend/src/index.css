@@ -27,20 +27,38 @@ html.light .bg-dark-900 { background-color: #ffffff !important; }
 html.light .bg-dark-800 { background-color: #f3f4f6 !important; }
 html.light .bg-dark-700 { background-color: #e5e7eb !important; }
 html.light .bg-dark-600 { background-color: #d1d5db !important; }
-html.light .text-white { color: #141414 !important; }
-html.light .text-dark-300 { color: #4b5563 !important; }
-html.light .text-dark-400 { color: #6b7280 !important; }
-html.light .text-dark-500 { color: #9ca3af !important; }
+html.light, html.light body { color: #000000 !important; }
+html.light .text-white { color: #000000 !important; }
+html.light .text-dark-100 { color: #000000 !important; }
+html.light .text-dark-200 { color: #000000 !important; }
+html.light .text-dark-300 { color: #111111 !important; }
+html.light .text-dark-400 { color: #222222 !important; }
+html.light .text-dark-500 { color: #333333 !important; }
+html.light .text-dark-600 { color: #444444 !important; }
+html.light .text-primary-400 { color: #aa141e !important; }
+html.light .text-primary-500 { color: #aa141e !important; }
+html.light .text-primary-600 { color: #aa141e !important; }
+html.light .text-primary-700 { color: #8a0f17 !important; }
 html.light .border-dark-700 { border-color: #e5e7eb !important; }
 html.light .border-dark-600 { border-color: #d1d5db !important; }
 html.light .border-dark-800 { border-color: #d1d5db !important; }
-html.light .placeholder-dark-400::placeholder { color: #6b7280 !important; }
-html.light .chat-bubble-received { background-color: #e5e7eb !important; color: #141414 !important; }
+html.light .placeholder-dark-400::placeholder { color: #666666 !important; }
+html.light .chat-bubble-received { background-color: #d1d5db !important; color: #000000 !important; }
+html.light .chat-bubble-received p { color: #000000 !important; }
+html.light .chat-bubble-received span { color: #000000 !important; }
+html.light .chat-bubble-sent { background-color: #aa141e !important; color: #ffffff !important; }
+html.light .chat-bubble-sent p { color: #ffffff !important; }
+html.light .chat-bubble-sent span { color: #ffffff !important; }
 html.light .hover\:bg-dark-700:hover { background-color: #e5e7eb !important; }
 html.light .hover\:bg-dark-800:hover { background-color: #f3f4f6 !important; }
 html.light .bg-dark-900\/95 { background-color: rgba(255,255,255,0.95) !important; }
 html.light ::-webkit-scrollbar-thumb { background: #c0c0c0 !important; }
 html.light ::-webkit-scrollbar-thumb:hover { background: #aa141e !important; }
+
+/* Avatar colors for light theme */
+html.light .rounded-full[style*="background-color"] {
+  filter: brightness(2) !important;
+}
 
 @layer components {
   .input-field {

@@ -1,8 +1,9 @@
-import { useState } from 'react'
-import { X, Settings, Trash2 } from 'lucide-react'
+import { useState, useRef } from 'react'
+import { X, Settings, Trash2, LogOut, Snowflake, Camera, Upload } from 'lucide-react'
 import api from '../api/axios'
 import toast from 'react-hot-toast'
 import { useChatStore } from '../store/chatStore'
+import { useAuthStore } from '../store/authStore'
 import Avatar from './Avatar'
 import { confirmDelete } from '../store/confirmStore'
 
@@ -10,7 +11,10 @@ export default function ChatSettingsModal({ chat, onClose }) {
   const [name, setName] = useState(chat.name || '')
   const [description, setDescription] = useState(chat.description || '')
   const [showDeletedLabel, setShowDeletedLabel] = useState(chat.show_deleted_label !== false)
+  const [avatarUrl, setAvatarUrl] = useState(chat.avatar_url || null)
+  const avatarInputRef = useRef(null)
   const { fetchChats } = useChatStore()
+  const { user } = useAuthStore()
 
   const handleSave = async () => {
     try {
@@ -38,6 +42,86 @@ export default function ChatSettingsModal({ chat, onClose }) {
     }
   }
 
+  const handleLeaveChat = async () => {
+    if (!(await confirmDelete(`Выйти из «${chat.name}»?`))) return
+    try {
+      await api.post(`/chats/${chat.id}/leave`)
+      toast.success('Вы вышли из чата')
+      fetchChats()
+      onClose()
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Ошибка')
+    }
+  }
+
+  const handleDeleteChat = async () => {
+    if (!(await confirmDelete(`Удалить «${chat.name}»? Это действие нельзя отменить.`))) return
+    try {
+      await api.delete(`/chats/${chat.id}`)
+      toast.success('Чат удалён')
+      fetchChats()
+      onClose()
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Ошибка')
+    }
+  }
+
+  const handleFreezeChat = async () => {
+    try {
+      const res = await api.post(`/chats/${chat.id}/freeze`)
+      toast.success(res.data.message)
+      fetchChats()
+      onClose()
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Ошибка')
+    }
+  }
+
+  const handleAvatarUpload = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      toast.error('Только изображения')
+      return
+    }
+    const formData = new FormData()
+    formData.append('file', file)
+    try {
+      console.log('Uploading avatar for chat:', chat.id)
+      const res = await api.post(`/chats/${chat.id}/avatar/upload`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      })
+      setAvatarUrl(res.data.avatar_url)
+      toast.success('Аватар обновлен')
+      fetchChats()
+    } catch (e) {
+      console.error('Avatar upload error:', e)
+      toast.error(e.response?.data?.detail || 'Ошибка загрузки аватара')
+    }
+    e.target.value = ''
+  }
+
+  const handleAvatarDelete = async () => {
+    if (!(await confirmDelete('Удалить аватар чата?'))) return
+    try {
+      await api.delete(`/chats/${chat.id}/avatar`)
+      setAvatarUrl(null)
+      toast.success('Аватар удален')
+      fetchChats()
+    } catch (e) {
+      toast.error('Ошибка удаления аватара')
+    }
+  }
+
+  // Check if current user is owner
+  const myMember = chat.members?.find(m => String(m.user_id) === String(user?.id))
+  const isOwner = myMember?.role === 'owner'
+  const isSuperAdmin = user?.role === 'super_admin'
+  const canLeave = chat.chat_type !== 'private' && !isOwner && !(chat.is_news_channel && chat.name === 'Новости ДГИ') && myMember
+  const canDelete = (chat.chat_type !== 'private' && isOwner && !(chat.is_news_channel && chat.name === 'Новости ДГИ')) || 
+                    (isSuperAdmin && chat.chat_type !== 'private' && !(chat.is_news_channel && chat.name === 'Новости ДГИ'))
+  const canFreeze = isSuperAdmin && chat.chat_type !== 'private' && !(chat.is_news_channel && chat.name === 'Новости ДГИ')
+
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
       <div className="bg-dark-900 rounded-2xl border border-dark-700 shadow-2xl w-full max-w-md max-h-[80vh] flex flex-col">
@@ -47,6 +131,42 @@ export default function ChatSettingsModal({ chat, onClose }) {
         </div>
 
         <div className="p-4 space-y-4 overflow-y-auto">
+          {/* Avatar section */}
+          {chat.chat_type !== 'private' && (
+            <div className="flex items-center gap-4">
+              <div className="relative">
+                <Avatar name={chat.name} url={avatarUrl} size="lg" />
+                <button
+                  onClick={() => avatarInputRef.current?.click()}
+                  className="absolute -bottom-1 -right-1 w-8 h-8 bg-primary-600 hover:bg-primary-700 rounded-full flex items-center justify-center text-white shadow-lg"
+                  title="Загрузить аватар"
+                >
+                  <Camera size={14} />
+                </button>
+                <input
+                  type="file"
+                  ref={avatarInputRef}
+                  className="hidden"
+                  accept="image/*"
+                  onChange={handleAvatarUpload}
+                />
+              </div>
+              <div className="flex-1">
+                <p className="text-sm text-white font-medium">Аватар чата</p>
+                <p className="text-xs text-dark-400">PNG, JPG до {10} МБ</p>
+              </div>
+              {avatarUrl && (
+                <button
+                  onClick={handleAvatarDelete}
+                  className="p-2 text-dark-400 hover:text-red-400 transition-colors"
+                  title="Удалить аватар"
+                >
+                  <Trash2 size={16} />
+                </button>
+              )}
+            </div>
+          )}
+
           <div>
             <label className="block text-xs font-medium text-dark-300 mb-1">Название</label>
             <input type="text" value={name} onChange={(e) => setName(e.target.value)} className="input-field" />
@@ -86,6 +206,27 @@ export default function ChatSettingsModal({ chat, onClose }) {
               ))}
             </div>
           </div>
+
+          {/* Leave chat button for non-owners */}
+          {canLeave && (
+            <button onClick={handleLeaveChat} className="w-full py-2.5 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-xl flex items-center justify-center gap-2">
+              <LogOut size={16} /> Выйти из чата
+            </button>
+          )}
+
+          {/* Delete chat button for owners and super_admin */}
+          {canDelete && (
+            <button onClick={handleDeleteChat} className="w-full py-2.5 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-xl flex items-center justify-center gap-2">
+              <Trash2 size={16} /> Удалить чат
+            </button>
+          )}
+
+          {/* Freeze chat button for super_admin */}
+          {canFreeze && (
+            <button onClick={handleFreezeChat} className={`w-full py-2.5 text-white text-sm font-medium rounded-xl flex items-center justify-center gap-2 ${chat.is_frozen ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'}`}>
+              <Snowflake size={16} /> {chat.is_frozen ? 'Разморозить чат' : 'Заморозить чат'}
+            </button>
+          )}
 
           <button onClick={handleSave} className="btn-primary w-full">Сохранить</button>
         </div>

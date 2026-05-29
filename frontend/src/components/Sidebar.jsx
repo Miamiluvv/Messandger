@@ -77,17 +77,25 @@ export default function Sidebar({ activeTab, onTabChange }) {
 
       {/* Chat List */}
       {activeTab === 'chats' && (
-        <div className="flex-1 overflow-y-auto">
-          {filteredChats.length === 0 ? (
-            <div className="p-6 text-center text-dark-400">
-              <MessageCircle size={32} className="mx-auto mb-2 opacity-50" />
-              <p className="text-sm">Нет чатов</p>
-            </div>
-          ) : (
-            filteredChats.map((chat) => (
-              <ChatItem key={chat.id} chat={chat} user={user} isActive={activeChat?.id === chat.id} onClick={() => setActiveChat(chat)} />
-            ))
-          )}
+        <div className="flex-1 overflow-y-auto flex flex-col">
+          <div className="flex-1">
+            {filteredChats.length === 0 ? (
+              <div className="p-6 text-center text-dark-400">
+                <MessageCircle size={32} className="mx-auto mb-2 opacity-50" />
+                <p className="text-sm">Нет чатов</p>
+              </div>
+            ) : (
+              filteredChats.map((chat) => (
+                <ChatItem key={chat.id} chat={chat} user={user} isActive={activeChat?.id === chat.id} onClick={() => setActiveChat(chat)} />
+              ))
+            )}
+          </div>
+          {/* New chat button at bottom */}
+          <div className="p-3 border-t border-dark-700">
+            <button onClick={() => setShowNewChat(true)} className="w-full py-2.5 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-xl flex items-center justify-center gap-2 transition-colors">
+              <Plus size={16} /> Новый чат
+            </button>
+          </div>
         </div>
       )}
 
@@ -147,8 +155,9 @@ function getChatName(chat, currentUser) {
 function formatTime(dateStr) {
   if (!dateStr) return ''
   const date = new Date(dateStr)
+  const adjustedDate = new Date(date.getTime() + 3 * 60 * 60 * 1000)
   const now = new Date()
-  const diff = now - date
-  if (diff < 86400000) return date.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })
-  return date.toLocaleDateString('ru', { day: '2-digit', month: '2-digit' })
+  const diff = now - adjustedDate
+  if (diff < 86400000) return adjustedDate.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })
+  return adjustedDate.toLocaleDateString('ru', { day: '2-digit', month: '2-digit' })
 }

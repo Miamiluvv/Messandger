@@ -31,8 +31,8 @@ Thumbs.db
 ~$*
 
 # Documents (out of repo scope)
-*.docx
-*.doc
+# *.docx
+# *.doc
 *.pdf
 *.pptx
 *.xlsx
