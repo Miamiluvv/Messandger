@@ -105,6 +105,17 @@ export default function CallModal() {
       localStream.getTracks().forEach(track => pc.addTrack(track, localStream))
     }
 
+    // For audio-only calls, add a video transceiver to maintain stable m-line order
+    // This prevents m-line order issues when adding video later (screen share)
+    if (localStream && !localStream.getVideoTracks().length) {
+      try {
+        pc.addTransceiver('video', { direction: 'sendrecv' })
+        console.log('Added sendrecv video transceiver for audio-only call')
+      } catch (e) {
+        console.log('Could not add video transceiver (may already exist):', e.message)
+      }
+    }
+
     addPeerConnection(peerId, pc)
     return pc
   }, [ws, activeCall, localStream, addRemoteStream, removeRemoteStream, addPeerConnection])
@@ -428,17 +439,17 @@ export default function CallModal() {
 
   // Helper: set a video track on a peer connection (replace existing sender or add new), then renegotiate
   const setVideoTrackAndRenegotiate = useCallback(async (peerId, pc, videoTrack, stream) => {
-    const videoSender = pc.getSenders().find(s => s.track?.kind === 'video')
-    if (videoSender) {
-      await videoSender.replaceTrack(videoTrack)
-      console.log(`Replaced video track for ${peerId}`)
-    } else {
-      pc.addTrack(videoTrack, stream)
-      console.log(`Added new video track for ${peerId} (no existing video sender)`)
-    }
+    // Close old peer connection and recreate to avoid m-line order issues
+    console.log(`Recreating peer connection for ${peerId} to avoid m-line order issues`)
+    pc.close()
+    const newPc = createPeerConnection(peerId)
+    
+    // Add all tracks from new stream
+    stream.getTracks().forEach(track => newPc.addTrack(track, stream))
+    
     try {
-      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true })
-      await pc.setLocalDescription(offer)
+      const offer = await newPc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true })
+      await newPc.setLocalDescription(offer)
       ws?.send(JSON.stringify({
         type: 'call_signal',
         call_id: activeCall?.id,
@@ -446,11 +457,11 @@ export default function CallModal() {
         signal: offer,
         recipients: [peerId],
       }))
-      console.log(`Renegotiated with ${peerId}`)
+      console.log(`Recreated connection and sent offer to ${peerId}`)
     } catch (e) {
-      console.error(`Renegotiation error with ${peerId}:`, e)
+      console.error(`Error recreating connection with ${peerId}:`, e)
     }
-  }, [ws, activeCall])
+  }, [ws, activeCall, createPeerConnection])
 
   // Screen sharing
   const toggleScreenShare = useCallback(async () => {
