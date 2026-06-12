@@ -53,8 +53,9 @@ export default function CallModal() {
   useEffect(() => {
     Object.entries(remoteStreams).forEach(([peerId, stream]) => {
       const el = remoteVideoRefs.current[peerId]
-      if (el && el.srcObject !== stream) {
+      if (el) {
         el.srcObject = stream
+        console.log('Assigned stream to video element for', peerId, 'video tracks:', stream.getVideoTracks().length)
       }
     })
   }, [remoteStreams])
@@ -75,8 +76,17 @@ export default function CallModal() {
     }
 
     pc.ontrack = (event) => {
-      console.log('ontrack fired for', peerId, 'streams:', event.streams.length, 'track:', event.track.kind)
-      addRemoteStream(peerId, event.streams[0])
+      console.log('ontrack fired for', peerId, 'streams:', event.streams.length, 'track:', event.track.kind, 'enabled:', event.track.enabled, 'muted:', event.track.muted)
+      const stream = event.streams[0]
+      addRemoteStream(peerId, stream)
+      // Force video element update
+      setTimeout(() => {
+        const el = remoteVideoRefs.current[peerId]
+        if (el && el.srcObject !== stream) {
+          el.srcObject = stream
+          console.log('Updated video element for', peerId)
+        }
+      }, 100)
     }
 
     pc.onconnectionstatechange = () => {
