@@ -404,7 +404,7 @@ export default function CallModal() {
       console.log(`Added new video track for ${peerId} (no existing video sender)`)
     }
     try {
-      const offer = await pc.createOffer()
+      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true })
       await pc.setLocalDescription(offer)
       ws?.send(JSON.stringify({
         type: 'call_signal',
