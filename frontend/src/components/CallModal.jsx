@@ -78,6 +78,11 @@ export default function CallModal() {
     pc.ontrack = (event) => {
       console.log('ontrack fired for', peerId, 'streams:', event.streams.length, 'track:', event.track.kind, 'enabled:', event.track.enabled, 'muted:', event.track.muted)
       const stream = event.streams[0]
+      // Unmute video track if it's muted
+      if (event.track.kind === 'video' && event.track.muted) {
+        event.track.enabled = true
+        console.log('Unmuted video track for', peerId)
+      }
       addRemoteStream(peerId, stream)
       // Force video element update
       setTimeout(() => {
@@ -470,7 +475,7 @@ export default function CallModal() {
         screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
         const videoTrack = screenStream.getVideoTracks()[0]
         const audioTrack = screenStream.getAudioTracks()[0]
-        console.log('Screen stream obtained:', videoTrack, audioTrack)
+        console.log('Screen stream obtained:', videoTrack, 'enabled:', videoTrack.enabled, 'muted:', videoTrack.muted, audioTrack)
 
         videoTrack.onended = () => {
           console.log('Screen share ended by user')
