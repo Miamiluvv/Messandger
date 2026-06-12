@@ -105,17 +105,6 @@ export default function CallModal() {
       localStream.getTracks().forEach(track => pc.addTrack(track, localStream))
     }
 
-    // For audio-only calls, add a video transceiver to maintain stable m-line order
-    // This prevents m-line order issues when adding video later (screen share)
-    if (localStream && !localStream.getVideoTracks().length) {
-      try {
-        pc.addTransceiver('video', { direction: 'sendrecv' })
-        console.log('Added sendrecv video transceiver for audio-only call')
-      } catch (e) {
-        console.log('Could not add video transceiver (may already exist):', e.message)
-      }
-    }
-
     addPeerConnection(peerId, pc)
     return pc
   }, [ws, activeCall, localStream, addRemoteStream, removeRemoteStream, addPeerConnection])
@@ -133,35 +122,17 @@ export default function CallModal() {
 
     if (signal_type === 'offer') {
       console.log('Received offer from', from_user, 'signalingState:', pc.signalingState)
-      try {
-        await pc.setRemoteDescription(new RTCSessionDescription(signal))
-        const answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
-        ws?.send(JSON.stringify({
-          type: 'call_signal',
-          call_id,
-          signal_type: 'answer',
-          signal: answer,
-          recipients: [from_user],
-        }))
-        console.log('Sent answer to', from_user)
-      } catch (e) {
-        console.error('Error handling offer, recreating peer connection:', e)
-        // Recreate peer connection on m-line order error
-        pc.close()
-        const newPc = createPeerConnection(from_user)
-        await newPc.setRemoteDescription(new RTCSessionDescription(signal))
-        const answer = await newPc.createAnswer()
-        await newPc.setLocalDescription(answer)
-        ws?.send(JSON.stringify({
-          type: 'call_signal',
-          call_id,
-          signal_type: 'answer',
-          signal: answer,
-          recipients: [from_user],
-        }))
-        console.log('Sent answer to', from_user, '(after recreation)')
-      }
+      await pc.setRemoteDescription(new RTCSessionDescription(signal))
+      const answer = await pc.createAnswer()
+      await pc.setLocalDescription(answer)
+      ws?.send(JSON.stringify({
+        type: 'call_signal',
+        call_id,
+        signal_type: 'answer',
+        signal: answer,
+        recipients: [from_user],
+      }))
+      console.log('Sent answer to', from_user)
     } else if (signal_type === 'answer') {
       console.log('Received answer from', from_user)
       await pc.setRemoteDescription(new RTCSessionDescription(signal))
@@ -331,14 +302,24 @@ export default function CallModal() {
       const recipients = participants.map(p => p.user_id).filter(Boolean)
 
       if (activeCall.isBroadcast) {
-        // В трансляции зритель просто покидает - трансляция продолжается
-        ws?.send(JSON.stringify({
-          type: 'call_leave',
-          call_id: activeCall.id,
-          from_user: user?.id,
-          recipients,
-        }))
-        try { await api.post(`/calls/${activeCall.id}/leave`) } catch (e) { /* ok */ }
+        if (activeCall.isOutgoing) {
+          // Ведущий завершает трансляцию для всех
+          ws?.send(JSON.stringify({
+            type: 'call_end',
+            call_id: activeCall.id,
+            recipients,
+          }))
+          try { await api.post(`/calls/${activeCall.id}/end`) } catch (e) { /* ok */ }
+        } else {
+          // Зритель просто покидает - трансляция продолжается
+          ws?.send(JSON.stringify({
+            type: 'call_leave',
+            call_id: activeCall.id,
+            from_user: user?.id,
+            recipients,
+          }))
+          try { await api.post(`/calls/${activeCall.id}/leave`) } catch (e) { /* ok */ }
+        }
       } else {
         // В обычном звонке (1-на-1) завершаем для всех участников
         ws?.send(JSON.stringify({
@@ -414,6 +395,11 @@ export default function CallModal() {
     if (!pc) {
       // Create peer connection for this viewer
       const newPc = createPeerConnection(data.from_user)
+      // Add local tracks (broadcaster's video/audio)
+      if (localStream) {
+        localStream.getTracks().forEach(track => newPc.addTrack(track, localStream))
+        console.log('Added local tracks to peer connection for viewer:', data.from_user)
+      }
       const offer = await newPc.createOffer()
       await newPc.setLocalDescription(offer)
       ws?.send(JSON.stringify({
@@ -435,21 +421,21 @@ export default function CallModal() {
         recipients: [data.from_user],
       }))
     }
-  }, [activeCall, peerConnections, createPeerConnection, ws])
+  }, [activeCall, peerConnections, createPeerConnection, ws, localStream])
 
   // Helper: set a video track on a peer connection (replace existing sender or add new), then renegotiate
   const setVideoTrackAndRenegotiate = useCallback(async (peerId, pc, videoTrack, stream) => {
-    // Close old peer connection and recreate to avoid m-line order issues
-    console.log(`Recreating peer connection for ${peerId} to avoid m-line order issues`)
-    pc.close()
-    const newPc = createPeerConnection(peerId)
-    
-    // Add all tracks from new stream
-    stream.getTracks().forEach(track => newPc.addTrack(track, stream))
-    
+    const videoSender = pc.getSenders().find(s => s.track?.kind === 'video')
+    if (videoSender) {
+      await videoSender.replaceTrack(videoTrack)
+      console.log(`Replaced video track for ${peerId}`)
+    } else {
+      pc.addTrack(videoTrack, stream)
+      console.log(`Added new video track for ${peerId} (no existing video sender)`)
+    }
     try {
-      const offer = await newPc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true })
-      await newPc.setLocalDescription(offer)
+      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true })
+      await pc.setLocalDescription(offer)
       ws?.send(JSON.stringify({
         type: 'call_signal',
         call_id: activeCall?.id,
@@ -457,11 +443,11 @@ export default function CallModal() {
         signal: offer,
         recipients: [peerId],
       }))
-      console.log(`Recreated connection and sent offer to ${peerId}`)
+      console.log(`Renegotiated with ${peerId}`)
     } catch (e) {
-      console.error(`Error recreating connection with ${peerId}:`, e)
+      console.error(`Renegotiation error with ${peerId}:`, e)
     }
-  }, [ws, activeCall, createPeerConnection])
+  }, [ws, activeCall])
 
   // Screen sharing
   const toggleScreenShare = useCallback(async () => {
@@ -793,7 +779,7 @@ export default function CallModal() {
             <div className="flex items-center gap-2 px-3 py-1.5 bg-dark-800 rounded-lg">
               <Users size={16} className="text-dark-400" />
               <span className="text-white text-sm font-medium">
-                {remoteStreamEntries.length + (isOutgoing ? 0 : 1)} зритель{remoteStreamEntries.length + (isOutgoing ? 0 : 1) !== 1 ? (remoteStreamEntries.length + (isOutgoing ? 0 : 1) > 4 ? 'ей' : 'я') : ''}
+                {remoteStreamEntries.length} зритель{remoteStreamEntries.length !== 1 ? (remoteStreamEntries.length > 4 ? 'ей' : 'я') : ''}
               </span>
             </div>
           </div>
@@ -801,25 +787,30 @@ export default function CallModal() {
 
         {/* Center: main controls */}
         <div className="flex items-center justify-center gap-4">
-          <button onClick={toggleMute}
-            className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${isMuted ? 'bg-red-600 text-white' : 'bg-dark-700 text-white hover:bg-dark-600'}`}
-            title={isMuted ? 'Включить микрофон' : 'Выключить микрофон'}>
-            {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
-          </button>
+          {/* Only show controls for broadcaster or regular calls */}
+          {!isBroadcast || isOutgoing ? (
+            <>
+              <button onClick={toggleMute}
+                className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${isMuted ? 'bg-red-600 text-white' : 'bg-dark-700 text-white hover:bg-dark-600'}`}
+                title={isMuted ? 'Включить микрофон' : 'Выключить микрофон'}>
+                {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
+              </button>
 
-          {isVideo && (
-            <button onClick={toggleCamera}
-              className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${isCameraOff ? 'bg-red-600 text-white' : 'bg-dark-700 text-white hover:bg-dark-600'}`}
-              title={isCameraOff ? 'Включить камеру' : 'Выключить камеру'}>
-              {isCameraOff ? <VideoOff size={20} /> : <Video size={20} />}
-            </button>
-          )}
+              {isVideo && (
+                <button onClick={toggleCamera}
+                  className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${isCameraOff ? 'bg-red-600 text-white' : 'bg-dark-700 text-white hover:bg-dark-600'}`}
+                  title={isCameraOff ? 'Включить камеру' : 'Выключить камеру'}>
+                  {isCameraOff ? <VideoOff size={20} /> : <Video size={20} />}
+                </button>
+              )}
 
-          <button onClick={toggleScreenShare}
-            className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${isScreenSharing ? 'bg-blue-600 text-white' : 'bg-dark-700 text-white hover:bg-dark-600'}`}
-            title={isScreenSharing ? 'Остановить демонстрацию' : 'Демонстрация экрана'}>
-            {isScreenSharing ? <MonitorOff size={20} /> : <Monitor size={20} />}
-          </button>
+              <button onClick={toggleScreenShare}
+                className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${isScreenSharing ? 'bg-blue-600 text-white' : 'bg-dark-700 text-white hover:bg-dark-600'}`}
+                title={isScreenSharing ? 'Остановить демонстрацию' : 'Демонстрация экрана'}>
+                {isScreenSharing ? <MonitorOff size={20} /> : <Monitor size={20} />}
+              </button>
+            </>
+          ) : null}
 
           <button onClick={endCall}
             className={`w-14 h-14 rounded-full flex items-center justify-center text-white transition-colors shadow-lg ${isBroadcast && isOutgoing ? 'bg-red-600 hover:bg-red-700' : 'bg-red-600 hover:bg-red-700'}`}

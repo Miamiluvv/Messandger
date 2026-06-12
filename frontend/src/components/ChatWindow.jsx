@@ -253,7 +253,10 @@ export default function ChatWindow() {
         }
       }
 
-      // Зрители не добавляют локальные треки - только receive
+      // Add recvonly transceivers for audio and video to receive broadcaster's stream
+      pc.addTransceiver('audio', { direction: 'recvonly' })
+      pc.addTransceiver('video', { direction: 'recvonly' })
+      console.log('Added recvonly transceivers for audio and video')
 
       addPeerConnection(broadcastInfo.from_user, pc)
 

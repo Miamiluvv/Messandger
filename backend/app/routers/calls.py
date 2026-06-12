@@ -77,50 +77,58 @@ async def start_call(data: dict, db: AsyncSession = Depends(get_db), current_use
     import uuid as uuid_mod
     from app.models.chat import Chat, ChatMember
 
-    chat_uuid = uuid_mod.UUID(data["chat_id"]) if data.get("chat_id") else None
+    try:
+        chat_uuid = uuid_mod.UUID(data["chat_id"]) if data.get("chat_id") else None
 
-    # ── Проверка прав на звонок в каналах ──────────────────────────────
-    if chat_uuid:
-        ch_res = await db.execute(select(Chat).where(Chat.id == chat_uuid))
-        chat = ch_res.scalar_one_or_none()
-        if chat and (chat.chat_type == "channel" or chat.is_news_channel):
-            # Только владелец/админ канала может начать трансляцию
-            mem_res = await db.execute(
-                select(ChatMember).where(
-                    ChatMember.chat_id == chat_uuid,
-                    ChatMember.user_id == current_user.id,
+        # ── Проверка прав на звонок в каналах ──────────────────────────────
+        if chat_uuid:
+            ch_res = await db.execute(select(Chat).where(Chat.id == chat_uuid))
+            chat = ch_res.scalar_one_or_none()
+            if chat and (chat.chat_type == "channel" or chat.is_news_channel):
+                # Только владелец/админ канала может начать трансляцию
+                mem_res = await db.execute(
+                    select(ChatMember).where(
+                        ChatMember.chat_id == chat_uuid,
+                        ChatMember.user_id == current_user.id,
+                    )
                 )
-            )
-            mem = mem_res.scalar_one_or_none()
-            if not mem or mem.role not in ("owner", "admin"):
-                raise HTTPException(
-                    status_code=403,
-                    detail="В каналах звонки запрещены. Только администратор канала может начать трансляцию.",
-                )
+                mem = mem_res.scalar_one_or_none()
+                if not mem or mem.role not in ("owner", "admin"):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="В каналах звонки запрещены. Только администратор канала может начать трансляцию.",
+                    )
 
-    # Для каналов трансляция начинается сразу (active), для обычных чатов - ringing
-    is_broadcast = data.get("is_broadcast", False)
-    initial_status = "active" if is_broadcast else "ringing"
-    
-    call = Call(
-        chat_id=chat_uuid,
-        initiator_id=current_user.id,
-        call_type=data.get("call_type", "audio"),
-        status=initial_status,
-        started_at=datetime.utcnow() if is_broadcast else None,
-    )
-    db.add(call)
-    await db.flush()
+        # Для каналов трансляция начинается сразу (active), для обычных чатов - ringing
+        is_broadcast = data.get("is_broadcast", False)
+        initial_status = "active" if is_broadcast else "ringing"
 
-    # Добавить инициатора как участника
-    db.add(CallParticipant(call_id=call.id, user_id=current_user.id, joined_at=datetime.utcnow() if is_broadcast else None))
+        call = Call(
+            chat_id=chat_uuid,
+            initiator_id=current_user.id,
+            call_type=data.get("call_type", "audio"),
+            status=initial_status,
+            started_at=datetime.utcnow() if is_broadcast else None,
+        )
+        db.add(call)
+        await db.flush()
 
-    # Добавить остальных участников (для обычных звонков)
-    if not is_broadcast:
-        for uid in data.get("participant_ids", []):
-            db.add(CallParticipant(call_id=call.id, user_id=uuid_mod.UUID(uid)))
+        # Добавить инициатора как участника
+        db.add(CallParticipant(call_id=call.id, user_id=current_user.id, joined_at=datetime.utcnow() if is_broadcast else None))
 
-    return {"id": str(call.id), "status": initial_status}
+        # Добавить остальных участников (для обычных звонков)
+        if not is_broadcast:
+            for uid in data.get("participant_ids", []):
+                db.add(CallParticipant(call_id=call.id, user_id=uuid_mod.UUID(uid)))
+
+        await db.commit()
+        return {"id": str(call.id), "status": initial_status}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error starting call: {e}")
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Ошибка при создании звонка")
 
 
 @router.post("/schedule")
@@ -217,47 +225,55 @@ async def join_call(call_id: str, db: AsyncSession = Depends(get_db), current_us
     import uuid as uuid_mod
     from app.models.chat import Chat, ChatMember
 
-    result = await db.execute(select(Call).where(Call.id == uuid_mod.UUID(call_id)))
-    call = result.scalar_one_or_none()
-    if not call:
-        raise HTTPException(status_code=404, detail="Звонок не найден")
+    try:
+        result = await db.execute(select(Call).where(Call.id == uuid_mod.UUID(call_id)))
+        call = result.scalar_one_or_none()
+        if not call:
+            raise HTTPException(status_code=404, detail="Звонок не найден")
 
-    # Проверить, что пользователь является членом чата (кроме трансляций в каналах)
-    if call.chat_id:
-        chat_result = await db.execute(select(Chat).where(Chat.id == call.chat_id))
-        chat = chat_result.scalar_one_or_none()
-        is_broadcast = chat and (chat.chat_type == "channel" or chat.is_news_channel)
+        # Проверить, что пользователь является членом чата (кроме трансляций в каналах)
+        if call.chat_id:
+            chat_result = await db.execute(select(Chat).where(Chat.id == call.chat_id))
+            chat = chat_result.scalar_one_or_none()
+            is_broadcast = chat and (chat.chat_type == "channel" or chat.is_news_channel)
 
-        if not is_broadcast:
-            mem_result = await db.execute(
-                select(ChatMember).where(
-                    ChatMember.chat_id == call.chat_id,
-                    ChatMember.user_id == current_user.id,
+            if not is_broadcast:
+                mem_result = await db.execute(
+                    select(ChatMember).where(
+                        ChatMember.chat_id == call.chat_id,
+                        ChatMember.user_id == current_user.id,
+                    )
                 )
-            )
-            member = mem_result.scalar_one_or_none()
-            if not member:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Вы не являетесь участником этого чата",
-                )
+                member = mem_result.scalar_one_or_none()
+                if not member:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Вы не являетесь участником этого чата",
+                    )
 
-    # Проверить/добавить участника
-    p_result = await db.execute(
-        select(CallParticipant).where(CallParticipant.call_id == call.id, CallParticipant.user_id == current_user.id)
-    )
-    participant = p_result.scalar_one_or_none()
-    if participant:
-        participant.joined_at = datetime.utcnow()
-        participant.left_at = None
-    else:
-        db.add(CallParticipant(call_id=call.id, user_id=current_user.id, joined_at=datetime.utcnow()))
+        # Проверить/добавить участника
+        p_result = await db.execute(
+            select(CallParticipant).where(CallParticipant.call_id == call.id, CallParticipant.user_id == current_user.id)
+        )
+        participant = p_result.scalar_one_or_none()
+        if participant:
+            participant.joined_at = datetime.utcnow()
+            participant.left_at = None
+        else:
+            db.add(CallParticipant(call_id=call.id, user_id=current_user.id, joined_at=datetime.utcnow()))
 
-    if call.status == "ringing":
-        call.status = "active"
-        call.started_at = datetime.utcnow()
+        if call.status == "ringing":
+            call.status = "active"
+            call.started_at = datetime.utcnow()
 
-    return {"status": "joined"}
+        await db.commit()
+        return {"status": "joined"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error joining call: {e}")
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Ошибка при присоединении к звонку")
 
 
 @router.post("/{call_id}/leave")

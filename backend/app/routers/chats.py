@@ -396,6 +396,22 @@ async def send_message(chat_id: str, data: dict, db: AsyncSession = Depends(get_
     db.add(message)
     await db.flush()
 
+    # Load reply_to relationship for the response using separate query
+    reply_data = None
+    if message.reply_to_id:
+        reply_result = await db.execute(
+            select(Message).where(Message.id == message.reply_to_id)
+        )
+        reply_msg = reply_result.scalar_one_or_none()
+        if reply_msg:
+            reply_sender_result = await db.execute(select(User).where(User.id == reply_msg.sender_id))
+            reply_sender = reply_sender_result.scalar_one_or_none()
+            reply_data = {
+                "id": str(reply_msg.id),
+                "content": reply_msg.content,
+                "sender_name": f"{reply_sender.first_name} {reply_sender.last_name}" if reply_sender else "",
+            }
+
     # Apply avatar visibility logic for current user
     avatar_url = current_user.avatar_url
     if avatar_url:
@@ -424,6 +440,17 @@ async def send_message(chat_id: str, data: dict, db: AsyncSession = Depends(get_
     if chat:
         chat.updated_at = datetime.utcnow()
 
+    # Load reply_to data if message is a reply
+    reply_data = None
+    if message.reply_to:
+        reply_sender_result = await db.execute(select(User).where(User.id == message.reply_to.sender_id))
+        reply_sender = reply_sender_result.scalar_one_or_none()
+        reply_data = {
+            "id": str(message.reply_to.id),
+            "content": message.reply_to.content,
+            "sender_name": f"{reply_sender.first_name} {reply_sender.last_name}" if reply_sender else "",
+        }
+
     return {
         "id": str(message.id),
         "chat_id": str(message.chat_id),
@@ -439,7 +466,7 @@ async def send_message(chat_id: str, data: dict, db: AsyncSession = Depends(get_
         "is_deleted": False,
         "attachments": [],
         "reactions": [],
-        "reply_to": None,
+        "reply_to": reply_data,
     }
 
 
