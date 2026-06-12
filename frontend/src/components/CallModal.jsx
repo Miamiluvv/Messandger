@@ -100,13 +100,6 @@ export default function CallModal() {
       localStream.getTracks().forEach(track => pc.addTrack(track, localStream))
     }
 
-    // For audio-only calls, add a video transceiver with recvonly to maintain m-line order
-    // This allows adding video later (screen share) without m-line order issues
-    if (localStream && !localStream.getVideoTracks().length) {
-      pc.addTransceiver('video', { direction: 'recvonly' })
-      console.log('Added recvonly video transceiver for audio-only call')
-    }
-
     addPeerConnection(peerId, pc)
     return pc
   }, [ws, activeCall, localStream, addRemoteStream, removeRemoteStream, addPeerConnection])
@@ -124,17 +117,35 @@ export default function CallModal() {
 
     if (signal_type === 'offer') {
       console.log('Received offer from', from_user, 'signalingState:', pc.signalingState)
-      await pc.setRemoteDescription(new RTCSessionDescription(signal))
-      const answer = await pc.createAnswer()
-      await pc.setLocalDescription(answer)
-      ws?.send(JSON.stringify({
-        type: 'call_signal',
-        call_id,
-        signal_type: 'answer',
-        signal: answer,
-        recipients: [from_user],
-      }))
-      console.log('Sent answer to', from_user)
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(signal))
+        const answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        ws?.send(JSON.stringify({
+          type: 'call_signal',
+          call_id,
+          signal_type: 'answer',
+          signal: answer,
+          recipients: [from_user],
+        }))
+        console.log('Sent answer to', from_user)
+      } catch (e) {
+        console.error('Error handling offer, recreating peer connection:', e)
+        // Recreate peer connection on m-line order error
+        pc.close()
+        const newPc = createPeerConnection(from_user)
+        await newPc.setRemoteDescription(new RTCSessionDescription(signal))
+        const answer = await newPc.createAnswer()
+        await newPc.setLocalDescription(answer)
+        ws?.send(JSON.stringify({
+          type: 'call_signal',
+          call_id,
+          signal_type: 'answer',
+          signal: answer,
+          recipients: [from_user],
+        }))
+        console.log('Sent answer to', from_user, '(after recreation)')
+      }
     } else if (signal_type === 'answer') {
       console.log('Received answer from', from_user)
       await pc.setRemoteDescription(new RTCSessionDescription(signal))
@@ -453,9 +464,10 @@ export default function CallModal() {
         toast.error('Не удалось переключиться на камеру')
       }
     } else {
+      let screenStream
       try {
         console.log('Starting screen share...')
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
+        screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
         const videoTrack = screenStream.getVideoTracks()[0]
         const audioTrack = screenStream.getAudioTracks()[0]
         console.log('Screen stream obtained:', videoTrack, audioTrack)
@@ -492,6 +504,11 @@ export default function CallModal() {
           errorMsg = 'Экран занят другим приложением'
         }
         toast.error(errorMsg)
+        // Stop screen stream if it was partially obtained
+        if (screenStream) {
+          screenStream.getTracks().forEach(t => t.stop())
+        }
+        return // Don't proceed with renegotiation on error
       }
     }
   }, [isScreenSharing, activeCall, localStream, peerConnections, setLocalStream, setScreenSharing])
