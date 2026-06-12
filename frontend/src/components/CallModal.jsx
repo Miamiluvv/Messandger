@@ -640,37 +640,78 @@ export default function CallModal() {
                 {remoteStreamEntries.map(([peerId, stream]) => {
                   const participant = activeCall?.participants?.find(p => p.user_id === peerId)
                   const participantName = participant ? `${participant.first_name} ${participant.last_name}` : 'Участник'
+                  const hasVideo = stream.getVideoTracks().length > 0
                   return (
                     <div key={peerId} className="relative rounded-2xl overflow-hidden bg-dark-800">
-                      <video
-                        ref={el => { if (el) remoteVideoRefs.current[peerId] = el }}
-                        autoPlay
-                        playsInline
-                        className="w-full h-full object-cover"
-                      />
-                      {/* Avatar overlay */}
-                      <div className="absolute bottom-3 left-3 flex items-center gap-2">
-                        <Avatar 
-                          name={participantName} 
-                          url={participant?.avatar_url} 
-                          size="sm" 
+                      {hasVideo ? (
+                        <video
+                          ref={el => { if (el) remoteVideoRefs.current[peerId] = el }}
+                          autoPlay
+                          playsInline
+                          className="w-full h-full object-cover"
                         />
-                        <span className="text-white text-xs font-medium bg-black/50 px-2 py-1 rounded">
-                          {participantName}
-                        </span>
-                      </div>
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center bg-dark-800">
+                          <Avatar 
+                            name={participantName} 
+                            url={participant?.avatar_url} 
+                            size="lg" 
+                          />
+                        </div>
+                      )}
+                      {/* Avatar overlay (only if video is present) */}
+                      {hasVideo && (
+                        <div className="absolute bottom-3 left-3 flex items-center gap-2">
+                          <Avatar 
+                            name={participantName} 
+                            url={participant?.avatar_url} 
+                            size="sm" 
+                          />
+                          <span className="text-white text-xs font-medium bg-black/50 px-2 py-1 rounded">
+                            {participantName}
+                          </span>
+                        </div>
+                      )}
+                      {/* Name label (only if no video) */}
+                      {!hasVideo && (
+                        <div className="absolute bottom-4 left-0 right-0 text-center">
+                          <span className="text-white text-sm font-medium bg-black/50 px-3 py-1.5 rounded inline-block">
+                            {participantName}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   )
                 })}
               </div>
             ) : (
               <div className="text-center">
-                <div className="w-24 h-24 rounded-full bg-dark-800 mx-auto mb-4 flex items-center justify-center">
-                  <Phone size={36} className={`text-dark-400 ${callStatus === 'ringing' ? 'animate-bounce' : ''}`} />
-                </div>
-                <p className="text-dark-400 text-sm">
-                  {callStatus === 'ringing' ? 'Ожидание ответа...' : callStatus === 'connecting' ? 'Подключение...' : 'Звонок активен'}
-                </p>
+                {activeCall?.participants?.length > 0 ? (
+                  <div className="flex flex-col items-center">
+                    {activeCall.participants.map(p => (
+                      <div key={p.user_id} className="mb-4">
+                        <Avatar 
+                          name={`${p.first_name} ${p.last_name}`} 
+                          url={p.avatar_url} 
+                          size="lg" 
+                        />
+                        <p className="text-white text-sm mt-2">{p.first_name} {p.last_name}</p>
+                      </div>
+                    ))}
+                    <p className="text-dark-400 text-sm">
+                      {callStatus === 'ringing' ? 'Ожидание ответа...' : callStatus === 'connecting' ? 'Подключение...' : 'Звонок активен'}
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="w-24 h-24 rounded-full bg-dark-800 mx-auto mb-4 flex items-center justify-center">
+                      <Phone size={36} className={`text-dark-400 ${callStatus === 'ringing' ? 'animate-bounce' : ''}`} />
+                    </div>
+                    <p className="text-dark-400 text-sm">
+                      {callStatus === 'ringing' ? 'Ожидание ответа...' : callStatus === 'connecting' ? 'Подключение...' : 'Звонок активен'}
+                    </p>
+                  </>
+                )}
               </div>
             )}
 
