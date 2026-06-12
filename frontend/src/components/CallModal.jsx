@@ -90,6 +90,13 @@ export default function CallModal() {
       localStream.getTracks().forEach(track => pc.addTrack(track, localStream))
     }
 
+    // For audio-only calls, add a video transceiver with recvonly to maintain m-line order
+    // This allows adding video later (screen share) without m-line order issues
+    if (localStream && !localStream.getVideoTracks().length) {
+      pc.addTransceiver('video', { direction: 'recvonly' })
+      console.log('Added recvonly video transceiver for audio-only call')
+    }
+
     addPeerConnection(peerId, pc)
     return pc
   }, [ws, activeCall, localStream, addRemoteStream, removeRemoteStream, addPeerConnection])
