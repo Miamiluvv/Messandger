@@ -63,6 +63,8 @@ export default function ChatWindow() {
   const isReadonly = activeChat?.members?.find(m => m.user_id === user?.id)?.role === 'readonly'
   const myRole = activeChat?.members?.find(m => m.user_id === user?.id)?.role
   const isAdminOfChat = myRole === 'owner' || myRole === 'admin'
+  const isSystemAdmin = user?.role === 'head' || user?.role === 'deputy_head' || user?.role === 'super_admin'
+  const canDeleteOthers = isAdminOfChat || isSystemAdmin
   // В каналах (новостных каналах) обычные звонки недоступны.
   // Только владелец/админ канала может начать трансляцию.
   const isChannel = activeChat?.chat_type === 'channel' || activeChat?.is_news_channel
@@ -187,7 +189,7 @@ export default function ChatWindow() {
       })
       // Start WebRTC call via global handler
       if (window.__startCall) {
-        window.__startCall(callType, isBroadcast ? [] : otherMembers, res.data.id, isBroadcast)
+        window.__startCall(callType, isBroadcast ? [] : otherMembers, res.data.id, isBroadcast, activeChat.id)
       }
     } catch (err) {
       toast.error('Ошибка начала звонка')
@@ -199,7 +201,7 @@ export default function ChatWindow() {
     try {
       // Присоединиться к трансляции через API
       await api.post(`/calls/${broadcastInfo.call_id}/join`)
-      
+
       // Получить информацию о ведущем
       const callerInfo = {
         user_id: broadcastInfo.from_user,
@@ -207,13 +209,10 @@ export default function ChatWindow() {
         last_name: broadcastInfo.from_name?.split(' ')[1] || '',
         avatar_url: broadcastInfo.from_avatar || null,
       }
-      
-      // Запустить WebRTC соединение
-      const constraints = { audio: true, video: broadcastInfo.call_type === 'video' }
-      const stream = await navigator.mediaDevices.getUserMedia(constraints)
-      
-      const { setLocalStream, setActiveCall, setCallStatus } = useCallStore.getState()
-      setLocalStream(stream)
+
+      const { setLocalStream, setActiveCall, setCallStatus, addPeerConnection } = useCallStore.getState()
+      // Зрители не отправляют камеру/микрофон - только смотрят
+      setLocalStream(null)
       setActiveCall({
         id: broadcastInfo.call_id,
         type: broadcastInfo.call_type,
@@ -222,18 +221,73 @@ export default function ChatWindow() {
         isBroadcast: true
       })
       setCallStatus('active')
-      
-      // Создать peer connection с ведущим
-      if (window.__callHandlers?.createPeerConnection) {
-        window.__callHandlers.createPeerConnection(broadcastInfo.from_user)
+
+      // Создать peer connection с ведущим (без локальных треков)
+      const ICE_SERVERS = [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+      ]
+      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate && useWebSocketStore.getState().ws?.readyState === WebSocket.OPEN) {
+          useWebSocketStore.getState().ws.send(JSON.stringify({
+            type: 'call_signal',
+            call_id: broadcastInfo.call_id,
+            signal_type: 'ice-candidate',
+            signal: event.candidate,
+            recipients: [broadcastInfo.from_user],
+          }))
+        }
       }
-      
+
+      pc.ontrack = (event) => {
+        console.log('Received track from broadcaster:', event.streams[0])
+        useCallStore.getState().addRemoteStream(broadcastInfo.from_user, event.streams[0])
+      }
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+          useCallStore.getState().removeRemoteStream(broadcastInfo.from_user)
+        }
+      }
+
+      // Зрители не добавляют локальные треки - только receive
+
+      addPeerConnection(broadcastInfo.from_user, pc)
+
+      // Запросить offer у ведущего
+      useWebSocketStore.getState().ws.send(JSON.stringify({
+        type: 'broadcast_join_request',
+        call_id: broadcastInfo.call_id,
+        from_user: user?.id,
+        recipients: [broadcastInfo.from_user],
+      }))
+
       // Очистить информацию о трансляции
       useCallStore.getState().setBroadcastInfo(null)
     } catch (err) {
-      toast.error('Ошибка присоединения к трансляции')
+      console.error('Join broadcast error:', err.name, err.message, err)
+      let errorMsg = 'Не удалось присоединиться к трансляции'
+      if (err.name === 'NotAllowedError') {
+        errorMsg = 'Ошибка доступа'
+      } else if (err.name === 'NotFoundError') {
+        errorMsg = 'Трансляция не найдена'
+      } else if (err.name === 'NotReadableError') {
+        errorMsg = 'Ошибка соединения'
+      } else if (err.name === 'OverconstrainedError') {
+        errorMsg = 'Устройство не поддерживает запрошенные параметры'
+      }
+      toast.error(errorMsg)
     }
   }
+
+  // Expose handleJoinBroadcast globally for system messages
+  useEffect(() => {
+    window.__joinBroadcast = handleJoinBroadcast
+    return () => { delete window.__joinBroadcast }
+  }, [handleJoinBroadcast, broadcastInfo])
 
   const startRecording = async () => {
     try {
@@ -430,7 +484,7 @@ export default function ChatWindow() {
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-1">
         {/* Broadcast join banner */}
-        {isChannel && broadcastInfo && (
+        {isChannel && broadcastInfo && (!broadcastInfo.chat_id || broadcastInfo.chat_id === activeChat?.id) && (
           <div className="mb-4 bg-gradient-to-r from-red-600/20 to-orange-600/20 border border-red-500/30 rounded-xl p-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-full bg-red-600/30 flex items-center justify-center">
@@ -461,7 +515,7 @@ export default function ChatWindow() {
               return (
                 <div key={msg.id}>
                   {showDate && <DateSeparator date={msg.created_at} />}
-                  <MessageBubble msg={msg} isMine={isMine} chatId={activeChat.id}
+                  <MessageBubble msg={msg} isMine={isMine} chatId={activeChat.id} canDeleteOthers={canDeleteOthers}
                     onReply={(m) => setReplyTo(m)}
                     onReplyClick={scrollToMessage}
                     onEdit={(m) => { setEditingMessage(m); setInputText(m.content || '') }}

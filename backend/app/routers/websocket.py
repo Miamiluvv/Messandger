@@ -170,6 +170,36 @@ async def websocket_endpoint(websocket: WebSocket):
                     "from_user": user_id,
                 })
 
+            elif event_type == "call_leave":
+                # Участник покидает звонок - уведомляем остальных
+                recipients = data.get("recipients", [])
+                await manager.send_to_users(recipients, {
+                    "type": "call_leave",
+                    "call_id": data.get("call_id"),
+                    "from_user": data.get("from_user"),
+                })
+
+            elif event_type == "broadcast_started":
+                # Трансляция отправляется всем подключённым пользователям
+                await manager.broadcast({
+                    "type": "broadcast_started",
+                    "call_id": data.get("call_id"),
+                    "call_type": data.get("call_type", "audio"),
+                    "from_user": user_id,
+                    "from_name": data.get("from_name", ""),
+                    "from_avatar": data.get("from_avatar"),
+                    "chat_id": data.get("chat_id"),
+                })
+
+            elif event_type == "broadcast_join_request":
+                # Зритель запрашивает offer от ведущего трансляции
+                recipients = data.get("recipients", [])
+                await manager.send_to_users(recipients, {
+                    "type": "broadcast_join_request",
+                    "call_id": data.get("call_id"),
+                    "from_user": data.get("from_user"),
+                })
+
     except WebSocketDisconnect:
         manager.disconnect(user_id)
         await _set_user_status(user_id, False)

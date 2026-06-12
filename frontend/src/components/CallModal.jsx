@@ -75,6 +75,7 @@ export default function CallModal() {
     }
 
     pc.ontrack = (event) => {
+      console.log('ontrack fired for', peerId, 'streams:', event.streams.length, 'track:', event.track.kind)
       addRemoteStream(peerId, event.streams[0])
     }
 
@@ -105,6 +106,7 @@ export default function CallModal() {
     }
 
     if (signal_type === 'offer') {
+      console.log('Received offer from', from_user, 'signalingState:', pc.signalingState)
       await pc.setRemoteDescription(new RTCSessionDescription(signal))
       const answer = await pc.createAnswer()
       await pc.setLocalDescription(answer)
@@ -115,7 +117,9 @@ export default function CallModal() {
         signal: answer,
         recipients: [from_user],
       }))
+      console.log('Sent answer to', from_user)
     } else if (signal_type === 'answer') {
+      console.log('Received answer from', from_user)
       await pc.setRemoteDescription(new RTCSessionDescription(signal))
     } else if (signal_type === 'ice-candidate') {
       try {
@@ -125,7 +129,7 @@ export default function CallModal() {
   }, [activeCall, peerConnections, createPeerConnection, ws])
 
   // Start outgoing call
-  const startCall = useCallback(async (callType, participantIds, callId, isBroadcast = false) => {
+  const startCall = useCallback(async (callType, participantIds, callId, isBroadcast = false, chatId = null) => {
     try {
       // Fetch participant info
       const participantsInfo = await Promise.all(
@@ -180,10 +184,22 @@ export default function CallModal() {
           call_type: callType,
           from_name: `${user?.first_name} ${user?.last_name}`,
           from_avatar: user?.avatar_url,
+          chat_id: chatId,
         }))
       }
     } catch (err) {
-      toast.error('Нет доступа к микрофону/камере')
+      console.error('Media access error:', err.name, err.message, err)
+      let errorMsg = 'Нет доступа к микрофону/камере'
+      if (err.name === 'NotAllowedError') {
+        errorMsg = 'Разрешите доступ к камере и микрофону в браузере'
+      } else if (err.name === 'NotFoundError') {
+        errorMsg = 'Камера или микрофон не найдены'
+      } else if (err.name === 'NotReadableError') {
+        errorMsg = 'Камера или микрофон заняты другим приложением'
+      } else if (err.name === 'OverconstrainedError') {
+        errorMsg = 'Устройство не поддерживает запрошенные параметры'
+      }
+      toast.error(errorMsg)
       cleanup()
     }
   }, [ws, user, setLocalStream, setCallStatus, setActiveCall, cleanup])
@@ -237,7 +253,18 @@ export default function CallModal() {
       createPeerConnection(incomingCall.from_user)
       setCallStatus('active')
     } catch (err) {
-      toast.error('Нет доступа к микрофону/камере')
+      console.error('Media access error (accept):', err.name, err.message, err)
+      let errorMsg = 'Нет доступа к микрофону/камере'
+      if (err.name === 'NotAllowedError') {
+        errorMsg = 'Разрешите доступ к камере и микрофону в браузере'
+      } else if (err.name === 'NotFoundError') {
+        errorMsg = 'Камера или микрофон не найдены'
+      } else if (err.name === 'NotReadableError') {
+        errorMsg = 'Камера или микрофон заняты другим приложением'
+      } else if (err.name === 'OverconstrainedError') {
+        errorMsg = 'Устройство не поддерживает запрошенные параметры'
+      }
+      toast.error(errorMsg)
       rejectCall()
     }
   }, [incomingCall, ws, setLocalStream, setActiveCall, setCallStatus, setIncomingCall, createPeerConnection])
@@ -257,15 +284,29 @@ export default function CallModal() {
   const endCall = useCallback(async () => {
     if (activeCall) {
       const participants = activeCall.participants || []
-      ws?.send(JSON.stringify({
-        type: 'call_end',
-        call_id: activeCall.id,
-        recipients: participants,
-      }))
-      try { await api.post(`/calls/${activeCall.id}/end`) } catch (e) { /* ok */ }
+      const recipients = participants.map(p => p.user_id).filter(Boolean)
+
+      if (activeCall.isBroadcast) {
+        // В трансляции зритель просто покидает - трансляция продолжается
+        ws?.send(JSON.stringify({
+          type: 'call_leave',
+          call_id: activeCall.id,
+          from_user: user?.id,
+          recipients,
+        }))
+        try { await api.post(`/calls/${activeCall.id}/leave`) } catch (e) { /* ok */ }
+      } else {
+        // В обычном звонке (1-на-1) завершаем для всех участников
+        ws?.send(JSON.stringify({
+          type: 'call_end',
+          call_id: activeCall.id,
+          recipients,
+        }))
+        try { await api.post(`/calls/${activeCall.id}/end`) } catch (e) { /* ok */ }
+      }
     }
     cleanup()
-  }, [activeCall, ws, cleanup])
+  }, [activeCall, ws, cleanup, user])
 
   // Handle call accepted by remote
   const handleCallAccepted = useCallback(async (data) => {
@@ -297,50 +338,143 @@ export default function CallModal() {
     toast.error('Звонок отклонён')
   }, [cleanup])
 
+  // Handle participant leaving call
+  const handleCallLeave = useCallback((data) => {
+    if (data.call_id !== activeCall?.id) return
+    console.log('Participant left:', data.from_user)
+    // Удаляем участника из списка
+    setActiveCall(prev => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        participants: prev.participants.filter(p => p.user_id !== data.from_user)
+      }
+    })
+    // Удаляем peer connection и remote stream
+    const { removeRemoteStream } = useCallStore.getState()
+    removeRemoteStream(data.from_user)
+    // Закрываем peer connection
+    const pc = peerConnections[data.from_user]
+    if (pc) {
+      pc.close()
+    }
+    toast('Участник покинул звонок')
+  }, [activeCall, peerConnections])
+
+  // Handle broadcast join request - viewer asks for offer
+  const handleBroadcastJoinRequest = useCallback(async (data) => {
+    if (data.call_id !== activeCall?.id || !activeCall?.isBroadcast) return
+    console.log('Sending offer to viewer:', data.from_user)
+
+    const pc = peerConnections[data.from_user]
+    if (!pc) {
+      // Create peer connection for this viewer
+      const newPc = createPeerConnection(data.from_user)
+      const offer = await newPc.createOffer()
+      await newPc.setLocalDescription(offer)
+      ws?.send(JSON.stringify({
+        type: 'call_signal',
+        call_id: data.call_id,
+        signal_type: 'offer',
+        signal: offer,
+        recipients: [data.from_user],
+      }))
+    } else {
+      // Already have connection, send new offer
+      const offer = await pc.createOffer()
+      await pc.setLocalDescription(offer)
+      ws?.send(JSON.stringify({
+        type: 'call_signal',
+        call_id: data.call_id,
+        signal_type: 'offer',
+        signal: offer,
+        recipients: [data.from_user],
+      }))
+    }
+  }, [activeCall, peerConnections, createPeerConnection, ws])
+
+  // Helper: set a video track on a peer connection (replace existing sender or add new), then renegotiate
+  const setVideoTrackAndRenegotiate = useCallback(async (peerId, pc, videoTrack, stream) => {
+    const videoSender = pc.getSenders().find(s => s.track?.kind === 'video')
+    if (videoSender) {
+      await videoSender.replaceTrack(videoTrack)
+      console.log(`Replaced video track for ${peerId}`)
+    } else {
+      pc.addTrack(videoTrack, stream)
+      console.log(`Added new video track for ${peerId} (no existing video sender)`)
+    }
+    try {
+      const offer = await pc.createOffer()
+      await pc.setLocalDescription(offer)
+      ws?.send(JSON.stringify({
+        type: 'call_signal',
+        call_id: activeCall?.id,
+        signal_type: 'offer',
+        signal: offer,
+        recipients: [peerId],
+      }))
+      console.log(`Renegotiated with ${peerId}`)
+    } catch (e) {
+      console.error(`Renegotiation error with ${peerId}:`, e)
+    }
+  }, [ws, activeCall])
+
   // Screen sharing
   const toggleScreenShare = useCallback(async () => {
     if (isScreenSharing) {
-      // Switch back to camera
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true })
-      setLocalStream(stream)
-      setScreenSharing(false)
-      // Replace tracks in peer connections
-      Object.values(peerConnections).forEach(pc => {
-        const sender = pc.getSenders().find(s => s.track?.kind === 'video')
-        if (sender && stream.getVideoTracks()[0]) {
-          sender.replaceTrack(stream.getVideoTracks()[0])
-        }
-      })
+      try {
+        // Switch back to camera
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+        setLocalStream(stream)
+        setScreenSharing(false)
+        const camVideoTrack = stream.getVideoTracks()[0]
+        Object.entries(peerConnections).forEach(([peerId, pc]) => {
+          if (camVideoTrack) setVideoTrackAndRenegotiate(peerId, pc, camVideoTrack, stream)
+        })
+      } catch (err) {
+        console.error('Switch back to camera error:', err.name, err.message, err)
+        toast.error('Не удалось переключиться на камеру')
+      }
     } else {
       try {
+        console.log('Starting screen share...')
         const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
         const videoTrack = screenStream.getVideoTracks()[0]
         const audioTrack = screenStream.getAudioTracks()[0]
-        videoTrack.onended = () => toggleScreenShare()
+        console.log('Screen stream obtained:', videoTrack, audioTrack)
+
+        videoTrack.onended = () => {
+          console.log('Screen share ended by user')
+          toggleScreenShare()
+        }
 
         // Combine audio tracks - prefer screen audio if available, otherwise keep mic
-        const audioTracks = audioTrack ? [audioTrack] : localStream.getAudioTracks()
-        const newStream = new MediaStream([
-          ...audioTracks,
-          videoTrack
-        ])
+        const audioTracks = audioTrack ? [audioTrack] : (localStream?.getAudioTracks() || [])
+        const newStream = new MediaStream([...audioTracks, videoTrack])
         setLocalStream(newStream)
         setScreenSharing(true)
 
-        // Replace video track in connections
-        Object.values(peerConnections).forEach(pc => {
-          const sender = pc.getSenders().find(s => s.track?.kind === 'video')
-          if (sender) sender.replaceTrack(videoTrack)
-          
+        // Send screen video to all peers (replace or add track)
+        Object.entries(peerConnections).forEach(([peerId, pc]) => {
+          setVideoTrackAndRenegotiate(peerId, pc, videoTrack, newStream)
           // Also replace audio track if screen audio is available
           if (audioTrack) {
             const audioSender = pc.getSenders().find(s => s.track?.kind === 'audio')
             if (audioSender) audioSender.replaceTrack(audioTrack)
           }
         })
-      } catch (e) {
-        console.error('Screen share error:', e)
-        toast.error('Не удалось начать демонстрацию экрана')
+        toast.success('Демонстрация экрана начата')
+      } catch (err) {
+        console.error('Screen share error:', err.name, err.message, err)
+        let errorMsg = 'Не удалось начать демонстрацию экрана'
+        if (err.name === 'NotAllowedError') {
+          errorMsg = 'Вы отменили выбор экрана'
+        } else if (err.name === 'NotFoundError') {
+          errorMsg = 'Нет доступных экранов'
+        } else if (err.name === 'NotReadableError') {
+          errorMsg = 'Экран занят другим приложением'
+        }
+        toast.error(errorMsg)
       }
     }
   }, [isScreenSharing, activeCall, localStream, peerConnections, setLocalStream, setScreenSharing])
@@ -353,9 +487,11 @@ export default function CallModal() {
       handleCallAccepted,
       handleCallEnded,
       handleCallRejected,
+      handleBroadcastJoinRequest,
+      handleCallLeave,
     }
     return () => { delete window.__callHandlers }
-  }, [handleSignal, handleCallAccepted, handleCallEnded, handleCallRejected])
+  }, [handleSignal, handleCallAccepted, handleCallEnded, handleCallRejected, handleBroadcastJoinRequest, handleCallLeave])
 
   // Expose startCall globally so other components can use it
   useEffect(() => {

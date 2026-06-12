@@ -126,8 +126,15 @@ async def start_call(data: dict, db: AsyncSession = Depends(get_db), current_use
 @router.post("/schedule")
 async def schedule_call(data: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     import uuid as uuid_mod
+    from datetime import timedelta
     from dateutil.parser import parse
+    from app.models.chat import Chat, ChatMember
+    from app.models.message import Message
+    from app.routers.websocket import manager
+
     scheduled_at = parse(data["scheduled_at"]) if isinstance(data.get("scheduled_at"), str) else data.get("scheduled_at")
+
+    participant_ids = [uuid_mod.UUID(uid) for uid in data.get("participant_ids", [])]
 
     call = Call(
         chat_id=uuid_mod.UUID(data["chat_id"]) if data.get("chat_id") else None,
@@ -139,8 +146,68 @@ async def schedule_call(data: dict, db: AsyncSession = Depends(get_db), current_
     db.add(call)
     await db.flush()
 
-    for uid in data.get("participant_ids", []):
-        db.add(CallParticipant(call_id=call.id, user_id=uuid_mod.UUID(uid)))
+    for pid in participant_ids:
+        db.add(CallParticipant(call_id=call.id, user_id=pid))
+
+    # ── Системное сообщение о запланированном звонке ───────────────────
+    # Собираем имена участников (инициатор + приглашённые)
+    all_user_ids = [current_user.id] + participant_ids
+    users_res = await db.execute(select(User).where(User.id.in_(all_user_ids)))
+    users = {u.id: u for u in users_res.scalars().all()}
+    names = [f"{u.first_name} {u.last_name}".strip() for u in users.values()]
+
+    # Время в локальном формате (UTC+3)
+    local_time = scheduled_at + timedelta(hours=3)
+    time_str = local_time.strftime("%d.%m.%Y в %H:%M")
+    call_kind = "видеозвонок" if data.get("call_type") == "video" else "звонок"
+    content = f"📅 Запланирован {call_kind} на {time_str}\nУчастники: {', '.join(names)}"
+
+    async def _ensure_private_chat(other_id):
+        # Найти существующий приватный чат между current_user и other_id
+        existing = await db.execute(
+            select(Chat).join(ChatMember).where(
+                Chat.chat_type == "private",
+                ChatMember.user_id == current_user.id,
+            )
+        )
+        for ch in existing.scalars().all():
+            mids = [m.user_id for m in ch.members]
+            if other_id in mids and current_user.id in mids and len(mids) == 2:
+                return ch
+        # Создать новый приватный чат
+        ch = Chat(chat_type="private", owner_id=current_user.id)
+        db.add(ch)
+        await db.flush()
+        db.add(ChatMember(chat_id=ch.id, user_id=current_user.id, role="owner"))
+        db.add(ChatMember(chat_id=ch.id, user_id=other_id, role="member"))
+        return ch
+
+    # Создаём системное сообщение в личном чате с каждым участником
+    for pid in participant_ids:
+        chat = await _ensure_private_chat(pid)
+        msg = Message(
+            chat_id=chat.id,
+            sender_id=current_user.id,
+            content=content,
+            message_type="system",
+        )
+        db.add(msg)
+        await db.flush()
+
+        # Уведомляем участника по WebSocket (live-добавление сообщения)
+        await manager.send_to_user(str(pid), {
+            "type": "new_message",
+            "chat_id": str(chat.id),
+            "message": {
+                "id": str(msg.id),
+                "chat_id": str(chat.id),
+                "sender_id": str(current_user.id),
+                "content": content,
+                "message_type": "system",
+                "is_system": True,
+                "created_at": msg.created_at.isoformat() if msg.created_at else datetime.utcnow().isoformat(),
+            },
+        })
 
     return {"id": str(call.id), "status": "scheduled", "scheduled_at": scheduled_at.isoformat()}
 
@@ -148,10 +215,32 @@ async def schedule_call(data: dict, db: AsyncSession = Depends(get_db), current_
 @router.post("/{call_id}/join")
 async def join_call(call_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     import uuid as uuid_mod
+    from app.models.chat import Chat, ChatMember
+
     result = await db.execute(select(Call).where(Call.id == uuid_mod.UUID(call_id)))
     call = result.scalar_one_or_none()
     if not call:
         raise HTTPException(status_code=404, detail="Звонок не найден")
+
+    # Проверить, что пользователь является членом чата (кроме трансляций в каналах)
+    if call.chat_id:
+        chat_result = await db.execute(select(Chat).where(Chat.id == call.chat_id))
+        chat = chat_result.scalar_one_or_none()
+        is_broadcast = chat and (chat.chat_type == "channel" or chat.is_news_channel)
+
+        if not is_broadcast:
+            mem_result = await db.execute(
+                select(ChatMember).where(
+                    ChatMember.chat_id == call.chat_id,
+                    ChatMember.user_id == current_user.id,
+                )
+            )
+            member = mem_result.scalar_one_or_none()
+            if not member:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Вы не являетесь участником этого чата",
+                )
 
     # Проверить/добавить участника
     p_result = await db.execute(
@@ -175,7 +264,8 @@ async def join_call(call_id: str, db: AsyncSession = Depends(get_db), current_us
 async def leave_call(call_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     import uuid as uuid_mod
     from app.models.chat import Chat
-    
+    from app.routers.websocket import manager
+
     result = await db.execute(
         select(CallParticipant).where(CallParticipant.call_id == uuid_mod.UUID(call_id), CallParticipant.user_id == current_user.id)
     )
@@ -194,7 +284,7 @@ async def leave_call(call_id: str, db: AsyncSession = Depends(get_db), current_u
             chat = chat_result.scalar_one_or_none()
             if chat and (chat.chat_type == "channel" or chat.is_news_channel):
                 is_broadcast = True
-        
+
         # Для обычных звонков завершаем, когда все покинули
         # Для трансляций в каналах - только владелец может завершить через /end
         if not is_broadcast:
@@ -211,6 +301,12 @@ async def leave_call(call_id: str, db: AsyncSession = Depends(get_db), current_u
                 call.ended_at = datetime.utcnow()
                 if call.started_at:
                     call.duration = int((call.ended_at - call.started_at).total_seconds())
+
+                # Отправляем call_end всем участникам звонка
+                await manager.broadcast({
+                    "type": "call_end",
+                    "call_id": str(call.id),
+                })
 
     return {"status": "left"}
 

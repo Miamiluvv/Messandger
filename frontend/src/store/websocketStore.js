@@ -51,14 +51,34 @@ export const useWebSocketStore = create((set, get) => ({
       } else if (data.type === 'call_invite') {
         useCallStore.getState().setIncomingCall(data)
       } else if (data.type === 'broadcast_started') {
+        console.log('Broadcast started:', data)
         // Показать уведомление о начале трансляции
         toast(`📡 Трансляция начана: ${data.from_name}`, { duration: 5000 })
         // Можно добавить кнопку для присоединения к трансляции
         useCallStore.getState().setBroadcastInfo(data)
+        // Добавить системное сообщение в чат
+        const chatStore = useChatStore.getState()
+        chatStore.addMessage(data.chat_id, {
+          id: `broadcast_${data.call_id}`,
+          sender_id: 'system',
+          sender_first_name: 'Система',
+          sender_last_name: '',
+          content: data.call_type === 'video' ? '📡 Началась видеотрансляция' : '📡 Началась аудиотрансляция',
+          created_at: new Date().toISOString(),
+          is_system: true,
+        })
+      } else if (data.type === 'broadcast_join_request') {
+        console.log('Broadcast join request:', data)
+        // Ведущий получает запрос от зрителя и должен отправить offer
+        window.__callHandlers?.handleBroadcastJoinRequest(data)
       } else if (data.type === 'call_accept') {
         window.__callHandlers?.handleCallAccepted(data)
       } else if (data.type === 'call_reject') {
         window.__callHandlers?.handleCallRejected(data)
+      } else if (data.type === 'call_leave') {
+        console.log('Call leave:', data)
+        // Участник покинул звонок - удаляем его из списка участников
+        window.__callHandlers?.handleCallLeave(data)
       } else if (data.type === 'call_end') {
         window.__callHandlers?.handleCallEnded(data)
       } else if (data.type === 'call_signal') {

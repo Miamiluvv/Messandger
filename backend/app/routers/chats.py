@@ -6,6 +6,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database import get_db
@@ -237,6 +238,7 @@ async def get_messages(chat_id: str, limit: int = 50, offset: int = 0, db: Async
 
     result = await db.execute(
         select(Message).where(Message.chat_id == cid, Message.is_scheduled == False)
+        .options(selectinload(Message.reply_to))
         .order_by(Message.created_at.desc()).limit(limit).offset(offset)
     )
     messages = list(reversed(result.scalars().all()))
@@ -462,12 +464,14 @@ async def delete_message(chat_id: str, message_id: str, db: AsyncSession = Depen
     )
     message = result.scalar_one_or_none()
     if not message:
-        # Проверяем: может админ чата удаляет чужое сообщение
+        # Проверяем: может админ чата или системный админ удалять чужое сообщение
         member_result = await db.execute(
             select(ChatMember).where(ChatMember.chat_id == cid, ChatMember.user_id == current_user.id)
         )
         member = member_result.scalar_one_or_none()
-        if not member or member.role not in ("owner", "admin"):
+        is_chat_admin = member and member.role in ("owner", "admin")
+        is_system_admin = current_user.role in ("head", "deputy_head", "super_admin")
+        if not is_chat_admin and not is_system_admin:
             raise HTTPException(status_code=404, detail="Сообщение не найдено")
         result2 = await db.execute(select(Message).where(Message.id == uuid_mod.UUID(message_id)))
         message = result2.scalar_one_or_none()
